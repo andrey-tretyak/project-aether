@@ -1,0 +1,29 @@
+{
+  "workflow_id": "sample-research-dag",
+  "tasks": [
+    {
+      "id": "ingest",
+      "agent_prompt": "Collect source facts for the quarterly reliability brief.",
+      "dependencies": [],
+      "payload": {"sources": ["logs", "metrics"]}
+    },
+    {
+      "id": "analyze",
+      "agent_prompt": "Summarize failure modes from ingested facts.",
+      "dependencies": ["ingest"],
+      "payload": {"focus": "worker teardown"}
+    },
+    {
+      "id": "critique",
+      "agent_prompt": "Challenge the analysis for missing recovery paths.",
+      "dependencies": ["ingest"],
+      "payload": {"lens": "fence-tokens"}
+    },
+    {
+      "id": "report",
+      "agent_prompt": "Write a final incident-ready report from analysis and critique.",
+      "dependencies": ["analyze", "critique"],
+      "payload": {"format": "markdown"}
+    }
+  ]
+}

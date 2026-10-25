@@ -1,0 +1,14 @@
+cluster:
+  name: aether-local
+  heartbeat_interval_ms: 500
+  worker_timeout_s: 3
+  lock_ttl_s: 5
+
+redis:
+  url: redis://redis:6379/0
+
+control_plane:
+  replicas: 1
+
+workers:
+  replicas: 3
