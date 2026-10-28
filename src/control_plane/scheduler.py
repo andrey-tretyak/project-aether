@@ -17,6 +17,7 @@ log = get_logger("aether.scheduler")
 TASK_QUEUE = "aether:queue:tasks"
 ACTIVE_WORKFLOWS = "aether:workflows:active"
 TASK_OWNER_PREFIX = "aether:task_owner:"
+MAX_RETRIES = 3
 
 
 class Scheduler:
@@ -80,9 +81,8 @@ class Scheduler:
             wal_index=recovered.wal_seq,
         )
 
-    async def apply_task_update(self, delta: dict[str, Any]) -> None:
-        """Wake after a worker WAL commit: recover, checkpoint, dispatch newly ready tasks."""
-        workflow_id = str(delta["workflow_id"])
+    async def _advance(self, workflow_id: str) -> None:
+        """Recover, checkpoint, then either retire the workflow or dispatch newly ready tasks."""
         recovered = await self.wal.recover_latest_state(workflow_id)
         if recovered is None:
             return
@@ -90,19 +90,23 @@ class Scheduler:
         await self._checkpoint(recovered)
 
         if workflow.is_complete() or workflow.has_failed():
-            await self.redis.srem(ACTIVE_WORKFLOWS, workflow_id)
-            log.info(
-                "workflow.terminal",
-                extra={
-                    "extra_fields": {
-                        "workflow_id": workflow_id,
-                        "complete": workflow.is_complete(),
-                        "failed": workflow.has_failed(),
-                    }
-                },
-            )
+            if await self.redis.srem(ACTIVE_WORKFLOWS, workflow_id):
+                log.info(
+                    "workflow.terminal",
+                    extra={
+                        "extra_fields": {
+                            "workflow_id": workflow_id,
+                            "complete": workflow.is_complete(),
+                            "failed": workflow.has_failed(),
+                        }
+                    },
+                )
             return
         await self._dispatch_ready(workflow)
+
+    async def apply_task_update(self, delta: dict[str, Any]) -> None:
+        """Wake after a worker WAL commit."""
+        await self._advance(str(delta["workflow_id"]))
 
     async def on_worker_failure(self, worker_id: str) -> None:
         """Reassign RUNNING tasks owned by a dead worker with a new fence token."""
@@ -123,10 +127,7 @@ class Scheduler:
                 await self._requeue_task(workflow, task.id, reason="worker_dead", worker_id=worker_id)
                 reassigned = True
             if reassigned:
-                recovered = await self.wal.recover_latest_state(workflow_id)
-                if recovered:
-                    await self._checkpoint(recovered)
-                    await self._dispatch_ready(recovered.workflow)
+                await self._advance(workflow_id)
 
     async def _dispatch_ready(self, workflow: DAGWorkflow) -> None:
         for task in workflow.ready_tasks():
@@ -147,7 +148,11 @@ class Scheduler:
                 "fence_token": fence,
             }
             await self.redis.set(f"aether:dispatched:{task.id}", str(time.time()))
-            await self.redis.lpush(TASK_QUEUE, json.dumps(envelope))
+            # Workers BRPOP from the right, so RPUSH puts a retry at the head of the line.
+            if task.retry_count > 0:
+                await self.redis.rpush(TASK_QUEUE, json.dumps(envelope))
+            else:
+                await self.redis.lpush(TASK_QUEUE, json.dumps(envelope))
             log.info(
                 "task.dispatched",
                 extra={
@@ -155,6 +160,7 @@ class Scheduler:
                         "workflow_id": workflow.workflow_id,
                         "task_id": task.id,
                         "fence_token": fence,
+                        "retry_count": task.retry_count,
                     }
                 },
             )
@@ -168,26 +174,31 @@ class Scheduler:
     ) -> None:
         task = workflow.task_map()[task_id]
         fence = await self.wal.bump_fence(task.id)
+        retries = task.retry_count + 1
+        exhausted = retries > MAX_RETRIES
         delta = {
-            "type": "task_reassigned",
+            "type": "task_failed" if exhausted else "task_reassigned",
             "workflow_id": workflow.workflow_id,
             "task_id": task.id,
-            "status": TaskStatus.PENDING.value,
+            "status": (TaskStatus.FAILED if exhausted else TaskStatus.PENDING).value,
             "fence_token": fence,
             "assigned_worker": None,
-            "retry_count": task.retry_count + 1,
+            "retry_count": retries,
         }
+        if exhausted:
+            delta["error"] = f"gave up after {MAX_RETRIES} retries (last: {reason})"
         await self.wal.append_delta(workflow.workflow_id, delta)
         await self.redis.delete(f"{TASK_OWNER_PREFIX}{task.id}")
         await self.redis.delete(f"aether:lock:{task.id}")
         log.info(
-            "task.reassigned",
+            "task.retries_exhausted" if exhausted else "task.reassigned",
             extra={
                 "extra_fields": {
                     "workflow_id": workflow.workflow_id,
                     "task_id": task.id,
                     "dead_worker": worker_id,
                     "fence_token": fence,
+                    "retry_count": retries,
                     "reason": reason,
                 }
             },
@@ -237,10 +248,7 @@ class Scheduler:
                 await self._requeue_task(workflow, task.id, reason="orphan_lost_envelope")
                 changed = True
             if changed:
-                recovered = await self.wal.recover_latest_state(workflow_id)
-                if recovered:
-                    await self._checkpoint(recovered)
-                    await self._dispatch_ready(recovered.workflow)
+                await self._advance(workflow_id)
 
     async def consume_results(self) -> None:
         """Listen for worker result publications on Redis Pub/Sub."""

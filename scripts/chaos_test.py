@@ -1,7 +1,8 @@
 """End-to-end chaos test: a real control plane and workers against a live Redis.
 
 Exits non-zero unless every task completes exactly once. With --kill-after, a
-worker that is mid-task is SIGKILLed and its work must finish on a survivor.
+worker that is mid-task is SIGKILLed and its work must finish on a survivor
+within the recovery budget.
 """
 
 from __future__ import annotations
@@ -30,7 +31,10 @@ from src.common.models import TaskStatus  # noqa: E402
 from src.control_plane.heartbeat import HEARTBEAT_HASH  # noqa: E402
 from src.control_plane.wal import WriteAheadLog  # noqa: E402
 
-DETECTION_BUDGET_S = 5.0
+# Lease TTL (3s) + monitor poll (0.5s), then up to one task (0.5s) waiting for a free worker
+# and one task (0.5s) of re-execution.
+DETECTION_BUDGET_S = 4.0
+RECOVERY_BUDGET_S = 5.0
 
 logging.getLogger("aether.wal").setLevel(logging.WARNING)
 
@@ -178,6 +182,8 @@ async def run(args: argparse.Namespace) -> None:
                 raise ChaosFailure(f"tasks still attributed to the killed worker: {moved}")
             if detected_after > DETECTION_BUDGET_S:
                 raise ChaosFailure(f"failure detection took {detected_after:.2f}s (budget {DETECTION_BUDGET_S}s)")
+            if recovered_after is None or recovered_after > RECOVERY_BUDGET_S:
+                raise ChaosFailure(f"in-flight work took {recovered_after}s to recover (budget {RECOVERY_BUDGET_S}s)")
             print(f"PASS  {victim} detected dead {detected_after:.2f}s after SIGKILL")
             print(f"PASS  its in-flight work finished on a survivor {recovered_after:.2f}s after SIGKILL")
     except Exception:
