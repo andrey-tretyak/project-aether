@@ -81,7 +81,9 @@ No. `recover_latest_state` loads the latest snapshot and replays deltas. LLM/too
 
 Honest scope: **execution is at-least-once**, **committed workflow state is fence-monotonic**. That is the useful guarantee for non-idempotent agent steps. Exactly-once *effects* on the outside world would need an idempotency key at the tool boundary; that is called out as future work, not pretended here.
 
-Orphans (dispatched but never claimed) are reclaimed after the same 3s bound so a `BRPOP` without a lock cannot stall a DAG forever.
+Orphans are reclaimed too: a task that is `RUNNING` in the log but is neither waiting in the queue nor held by a live worker (for example, a worker died between `BRPOP` and taking the lock) is requeued after the same 3s bound. Tasks that are simply waiting behind a backlog are left alone.
+
+Snapshots record exactly how many WAL entries they reflect, so a commit that lands while the control plane is checkpointing is replayed on the next recovery instead of being skipped.
 
 ---
 
@@ -119,14 +121,16 @@ docker compose logs -f control-plane worker
 
 ### Chaos
 
+`chaos_dag.json` is 60 parallel shards plus a merge step, so the cluster is still busy when the kill lands.
+
 ```sh
 docker compose up --build --scale worker=3 -d
-docker compose run --rm control-plane python -m src.main submit-workflow sample_dag.json
+docker compose run --rm control-plane python -m src.main submit-workflow chaos_dag.json
 sleep 2 && docker kill "$(docker compose ps -q worker | head -n 1)"
-docker compose logs control-plane | grep -E "Recovering state|task.reassigned|worker.dead"
+docker compose logs control-plane | grep -E "worker.dead|task.reassigned|workflow.terminal"
 ```
 
-You should see the worker marked dead, a fence bump, requeue, and the DAG completing on the survivors.
+You should see the worker marked dead about 3s after its last heartbeat, its in-flight task reassigned with a higher fence, and `workflow.terminal` with `"complete": true` once the survivors finish.
 
 ---
 
@@ -134,7 +138,8 @@ You should see the worker marked dead, a fence bump, requeue, and the DAG comple
 
 ```
 tests/test_dag_resolution.py    ready-set, joins, cycles, missing edges
-tests/test_chaos_recovery.py    WAL replay after snapshot, stale fence reject, reassignment
+tests/test_chaos_recovery.py    WAL replay, stale fence reject, reassignment,
+                                checkpoint/commit race, orphan vs. backlog
 ```
 
 `pytest` uses `fakeredis` so CI does not need a live Redis. The Compose chaos path above is the integration check.

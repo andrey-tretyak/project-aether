@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
@@ -41,31 +42,51 @@ class WriteAheadLog:
         """Append an immutable state delta. Rejects stale fence tokens."""
         task_id = delta.get("task_id")
         fence = delta.get("fence_token")
-        if task_id is not None and fence is not None:
-            current = await self.current_fence(str(task_id))
-            if current > int(fence):
-                raise StaleFenceError(
-                    f"stale fence for {task_id}: got {fence}, current {current}"
-                )
+        payload = json.dumps(delta)
         try:
-            seq = await self.redis.rpush(self._wal_key(workflow_id), json.dumps(delta))
+            if task_id is None or fence is None:
+                seq = await self.redis.rpush(self._wal_key(workflow_id), payload)
+            else:
+                seq = await self._fenced_append(workflow_id, str(task_id), int(fence), payload)
             log.info(
                 "wal.append",
                 extra={"extra_fields": {"workflow_id": workflow_id, "seq": seq}},
             )
             return int(seq)
+        except StaleFenceError:
+            raise
         except Exception:
             log.exception("wal.append_failed", extra={"extra_fields": {"workflow_id": workflow_id}})
             raise
 
-    async def checkpoint(self, workflow_id: str, state_snapshot: dict[str, Any]) -> None:
+    async def _fenced_append(self, workflow_id: str, task_id: str, fence: int, payload: str) -> int:
+        # WATCH aborts the append if the fence is bumped between the check and the RPUSH.
+        fence_key = self._fence_key(task_id)
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(fence_key)
+                    raw = await pipe.get(fence_key)
+                    current = int(raw) if raw is not None else 0
+                    if current > fence:
+                        raise StaleFenceError(
+                            f"stale fence for {task_id}: got {fence}, current {current}"
+                        )
+                    pipe.multi()
+                    pipe.rpush(self._wal_key(workflow_id), payload)
+                    (seq,) = await pipe.execute()
+                    return int(seq)
+                except WatchError:
+                    continue
+
+    async def checkpoint(self, workflow_id: str, state_snapshot: dict[str, Any], wal_index: int) -> None:
+        """Persist a snapshot. `wal_index` must be the number of WAL entries the snapshot reflects."""
         try:
-            wal_len = int(await self.redis.llen(self._wal_key(workflow_id)))
-            payload = json.dumps({"wal_index": wal_len, "state": state_snapshot})
+            payload = json.dumps({"wal_index": wal_index, "state": state_snapshot})
             await self.redis.set(self._snap_key(workflow_id), payload)
             log.info(
                 "wal.checkpoint",
-                extra={"extra_fields": {"workflow_id": workflow_id, "wal_index": wal_len}},
+                extra={"extra_fields": {"workflow_id": workflow_id, "wal_index": wal_index}},
             )
         except Exception:
             log.exception("wal.checkpoint_failed", extra={"extra_fields": {"workflow_id": workflow_id}})
@@ -95,7 +116,7 @@ class WriteAheadLog:
                 delta = json.loads(raw)
                 _apply_delta(workflow, delta)
 
-            wal_seq = int(await self.redis.llen(self._wal_key(workflow_id)))
+            wal_seq = start + len(entries)
             recovered = WorkflowState(workflow=workflow, wal_seq=wal_seq)
             log.info(
                 "Recovering state",

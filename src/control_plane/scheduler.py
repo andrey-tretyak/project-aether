@@ -8,7 +8,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from src.common.logger import get_logger
-from src.common.models import DAGWorkflow, TaskStatus
+from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
 from src.control_plane.heartbeat import WORKER_TIMEOUT_S, HeartbeatMonitor
 from src.control_plane.wal import WriteAheadLog
 
@@ -63,13 +63,22 @@ class Scheduler:
         if workflow.has_cycle():
             raise ValueError(f"cycle detected in workflow {workflow.workflow_id}")
 
-        await self.wal.append_delta(
+        seq = await self.wal.append_delta(
             workflow.workflow_id,
             {"type": "workflow_submitted", "workflow": workflow.model_dump(mode="json")},
         )
-        await self.wal.checkpoint(workflow.workflow_id, {"workflow": workflow.model_dump(mode="json")})
+        await self.wal.checkpoint(
+            workflow.workflow_id, {"workflow": workflow.model_dump(mode="json")}, wal_index=seq
+        )
         await self.redis.sadd(ACTIVE_WORKFLOWS, workflow.workflow_id)
         await self._dispatch_ready(workflow)
+
+    async def _checkpoint(self, recovered: WorkflowState) -> None:
+        await self.wal.checkpoint(
+            recovered.workflow.workflow_id,
+            {"workflow": recovered.workflow.model_dump(mode="json")},
+            wal_index=recovered.wal_seq,
+        )
 
     async def apply_task_update(self, delta: dict[str, Any]) -> None:
         """Wake after a worker WAL commit: recover, checkpoint, dispatch newly ready tasks."""
@@ -78,7 +87,7 @@ class Scheduler:
         if recovered is None:
             return
         workflow = recovered.workflow
-        await self.wal.checkpoint(workflow_id, {"workflow": workflow.model_dump(mode="json")})
+        await self._checkpoint(recovered)
 
         if workflow.is_complete() or workflow.has_failed():
             await self.redis.srem(ACTIVE_WORKFLOWS, workflow_id)
@@ -116,9 +125,7 @@ class Scheduler:
             if reassigned:
                 recovered = await self.wal.recover_latest_state(workflow_id)
                 if recovered:
-                    await self.wal.checkpoint(
-                        workflow_id, {"workflow": recovered.workflow.model_dump(mode="json")}
-                    )
+                    await self._checkpoint(recovered)
                     await self._dispatch_ready(recovered.workflow)
 
     async def _dispatch_ready(self, workflow: DAGWorkflow) -> None:
@@ -186,8 +193,22 @@ class Scheduler:
             },
         )
 
+    async def _queued_envelopes(self) -> set[tuple[str, int]]:
+        queued: set[tuple[str, int]] = set()
+        for raw in await self.redis.lrange(TASK_QUEUE, 0, -1):
+            try:
+                env = json.loads(raw)
+                queued.add((str(env["task_id"]), int(env["fence_token"])))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+        return queued
+
     async def _reclaim_orphans(self) -> None:
+        """Requeue RUNNING tasks that no live worker holds and that are no longer waiting in the queue."""
         workflow_ids = await self.redis.smembers(ACTIVE_WORKFLOWS)
+        if not workflow_ids:
+            return
+        queued = await self._queued_envelopes()
         for raw_id in workflow_ids:
             workflow_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
             recovered = await self.wal.recover_latest_state(workflow_id)
@@ -198,25 +219,27 @@ class Scheduler:
             for task in workflow.tasks:
                 if task.status != TaskStatus.RUNNING:
                     continue
-                owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}") or task.assigned_worker
-                if owner and await self.heartbeat.is_alive(owner):
+                if (task.id, task.fence_token) in queued:
                     continue
-                if owner and not await self.heartbeat.is_alive(owner):
+                owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}") or task.assigned_worker
+                if owner:
+                    if await self.heartbeat.is_alive(owner):
+                        continue
                     await self._requeue_task(workflow, task.id, reason="orphan_dead_owner")
                     changed = True
+                    continue
+                if await self.redis.exists(f"aether:lock:{task.id}"):
                     continue
                 dispatched_at = await self.redis.get(f"aether:dispatched:{task.id}")
                 age = time.time() - float(dispatched_at) if dispatched_at else WORKER_TIMEOUT_S + 1
                 if age <= WORKER_TIMEOUT_S:
                     continue
-                await self._requeue_task(workflow, task.id, reason="orphan")
+                await self._requeue_task(workflow, task.id, reason="orphan_lost_envelope")
                 changed = True
             if changed:
                 recovered = await self.wal.recover_latest_state(workflow_id)
                 if recovered:
-                    await self.wal.checkpoint(
-                        workflow_id, {"workflow": recovered.workflow.model_dump(mode="json")}
-                    )
+                    await self._checkpoint(recovered)
                     await self._dispatch_ready(recovered.workflow)
 
     async def consume_results(self) -> None:

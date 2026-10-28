@@ -31,11 +31,11 @@ def _dag() -> DAGWorkflow:
 @pytest.mark.asyncio
 async def test_wal_replays_deltas_after_snapshot(wal):
     workflow = _dag()
-    await wal.append_delta(
+    seq = await wal.append_delta(
         "chaos",
         {"type": "workflow_submitted", "workflow": workflow.model_dump(mode="json")},
     )
-    await wal.checkpoint("chaos", {"workflow": workflow.model_dump(mode="json")})
+    await wal.checkpoint("chaos", {"workflow": workflow.model_dump(mode="json")}, wal_index=seq)
     fence = await wal.bump_fence("root")
     await wal.append_delta(
         "chaos",
@@ -106,3 +106,58 @@ async def test_worker_failure_reassigns_running_task(redis, wal):
     queued = await redis.lrange("aether:queue:tasks", 0, -1)
     envelopes = [json.loads(item) for item in queued]
     assert any(env["task_id"] == "root" and env["fence_token"] == root.fence_token for env in envelopes)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_keeps_commit_that_lands_after_recover(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(_dag())
+    recovered = await wal.recover_latest_state("chaos")
+    root = recovered.workflow.task_map()["root"]
+
+    await wal.append_delta(
+        "chaos",
+        {
+            "type": "task_completed",
+            "task_id": "root",
+            "status": TaskStatus.COMPLETED.value,
+            "fence_token": root.fence_token,
+        },
+    )
+    await scheduler._checkpoint(recovered)
+
+    after = await wal.recover_latest_state("chaos")
+    assert after.workflow.task_map()["root"].status == TaskStatus.COMPLETED
+
+
+async def _age_dispatch(redis, task_id: str) -> None:
+    await redis.set(f"aether:dispatched:{task_id}", "0")
+
+
+@pytest.mark.asyncio
+async def test_orphan_reclaim_ignores_tasks_still_in_queue(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(_dag())
+    await _age_dispatch(redis, "root")
+
+    await scheduler._reclaim_orphans()
+
+    root = (await wal.recover_latest_state("chaos")).workflow.task_map()["root"]
+    assert root.retry_count == 0
+    assert root.fence_token == 1
+    assert await redis.llen("aether:queue:tasks") == 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_reclaim_requeues_lost_envelope(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(_dag())
+    await redis.rpop("aether:queue:tasks")
+    await _age_dispatch(redis, "root")
+
+    await scheduler._reclaim_orphans()
+
+    root = (await wal.recover_latest_state("chaos")).workflow.task_map()["root"]
+    assert root.retry_count == 1
+    envelopes = [json.loads(e) for e in await redis.lrange("aether:queue:tasks", 0, -1)]
+    assert [(e["task_id"], e["fence_token"]) for e in envelopes] == [("root", root.fence_token)]
