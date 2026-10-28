@@ -1,5 +1,7 @@
 # Aether
 
+[![CI](https://github.com/andrey-tretyak/project-aether/actions/workflows/ci.yml/badge.svg)](https://github.com/andrey-tretyak/project-aether/actions/workflows/ci.yml)
+
 **Fault-tolerant orchestration for multi-agent DAGs.** Workers can die mid-step; state cannot.
 
 Aether runs agent workflows as a directed acyclic graph across a local Docker cluster. It is built for the failure mode that breaks most “just queue the LLM calls” systems: a worker disappears while holding a tool result, then comes back and tries to write it after the task has already been given to someone else.
@@ -140,9 +142,24 @@ You should see the worker marked dead about 3s after its last heartbeat, its in-
 tests/test_dag_resolution.py    ready-set, joins, cycles, missing edges
 tests/test_chaos_recovery.py    WAL replay, stale fence reject, reassignment,
                                 checkpoint/commit race, orphan vs. backlog
+scripts/chaos_test.py           real control plane + workers against live Redis
 ```
 
-`pytest` uses `fakeredis` so CI does not need a live Redis. The Compose chaos path above is the integration check.
+Unit tests use `fakeredis`. The chaos test starts the actual processes, optionally `SIGKILL`s a worker that is mid-task, and fails unless every task commits exactly once and the dead worker is detected within 5s:
+
+```sh
+redis-server --daemonize yes
+python scripts/chaos_test.py --kill-after 2
+```
+
+```
+killed worker-1 while it held step-18
+PASS  61 tasks, 3 workers, completed in 8.03s, one commit per task
+PASS  worker-1 detected dead 3.03s after SIGKILL
+PASS  its in-flight work finished on a survivor 5.91s after SIGKILL
+```
+
+CI runs the unit tests, then the chaos test three ways (sample DAG, 61-task backlog, and a mid-run kill) on every push.
 
 ---
 
