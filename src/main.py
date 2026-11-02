@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 import sys
 from pathlib import Path
 
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow
-from src.common.redis_client import create_redis
+from src.common.redis_client import create_redis, create_sync_redis
 from src.control_plane.scheduler import Scheduler
 from src.worker.executor import WorkerExecutor
 
@@ -28,10 +29,15 @@ async def run_control_plane() -> None:
 
 async def run_worker() -> None:
     redis = create_redis()
-    worker = WorkerExecutor(redis)
+    heartbeat_client = create_sync_redis()
+    worker = WorkerExecutor(redis, heartbeat_client=heartbeat_client)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, worker.request_stop)
     try:
         await worker.run()
     finally:
+        heartbeat_client.close()
         await redis.aclose()
 
 
@@ -40,7 +46,7 @@ async def submit_workflow(path: str) -> None:
     workflow = DAGWorkflow.model_validate(payload)
     redis = create_redis()
     scheduler = Scheduler(redis)
-    await scheduler.submit_workflow(workflow)
+    await scheduler.submit_workflow(workflow, dispatch=False)
     log.info(
         "workflow.submitted",
         extra={"extra_fields": {"workflow_id": workflow.workflow_id, "tasks": len(workflow.tasks)}},

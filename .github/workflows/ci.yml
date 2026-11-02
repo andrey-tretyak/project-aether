@@ -44,3 +44,5 @@ jobs:
         run: python scripts/chaos_test.py
       - name: SIGKILL a busy worker mid-run
         run: python scripts/chaos_test.py --kill-after 2
+      - name: SIGTERM a busy worker (graceful drain)
+        run: python scripts/chaos_test.py --stop-after 2

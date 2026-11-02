@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import fakeredis
@@ -176,6 +177,43 @@ async def _claim(redis, wal, workflow_id: str, task_id: str, worker_id: str) -> 
             "assigned_worker": worker_id,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recovery_paths_reassign_a_task_once(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(_dag())
+    await redis.rpop("aether:queue:tasks")
+    await _claim(redis, wal, "chaos", "root", "worker-1")
+
+    # fakeredis never yields to the event loop; widen the read-then-bump window like real I/O does.
+    bump_fence = scheduler.wal.bump_fence
+
+    async def slow_bump_fence(task_id: str) -> int:
+        await asyncio.sleep(0.01)
+        return await bump_fence(task_id)
+
+    scheduler.wal.bump_fence = slow_bump_fence
+
+    await asyncio.gather(scheduler.on_worker_failure("worker-1"), scheduler._reclaim_orphans())
+
+    root = (await wal.recover_latest_state("chaos")).workflow.task_map()["root"]
+    assert root.retry_count == 1
+    envelopes = [json.loads(e) for e in await redis.lrange("aether:queue:tasks", 0, -1)]
+    assert [(e["task_id"], e["fence_token"]) for e in envelopes] == [("root", root.fence_token)]
+
+
+@pytest.mark.asyncio
+async def test_client_submission_leaves_dispatch_to_the_control_plane(redis, wal):
+    client = Scheduler(redis)
+    await client.submit_workflow(_dag(), dispatch=False)
+    assert await redis.llen("aether:queue:tasks") == 0
+
+    control_plane = Scheduler(redis)
+    await control_plane.apply_task_update({"type": "workflow_submitted", "workflow_id": "chaos"})
+
+    envelopes = [json.loads(e) for e in await redis.lrange("aether:queue:tasks", 0, -1)]
+    assert [e["task_id"] for e in envelopes] == ["root"]
 
 
 @pytest.mark.asyncio

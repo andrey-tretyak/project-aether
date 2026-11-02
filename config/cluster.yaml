@@ -1,14 +1,21 @@
-cluster:
-  name: aether-local
-  heartbeat_interval_ms: 500
-  worker_timeout_s: 3
-  lock_ttl_s: 5
+# Liveness and locking. Any value can be overridden with the AETHER_* environment
+# variable listed in src/common/config.py. Redis is set with REDIS_URL.
 
-redis:
-  url: redis://redis:6379/0
+heartbeat:
+  # How often a worker renews its lease.
+  interval_s: 0.5
+  # A worker whose lease is not renewed for this long is declared dead. 1.5s is
+  # three heartbeats, so two consecutive missed renewals are tolerated. See the
+  # lease sweep in the README for how this was chosen.
+  lease_s: 1.5
+  # How often the control plane scans for expired leases.
+  monitor_poll_s: 0.5
+  # "thread": renew from a dedicated thread, so blocking task code cannot starve it.
+  # "loop": renew from the asyncio event loop (kept for comparison).
+  mode: thread
+  # In thread mode, stop renewing if the event loop has made no progress for this
+  # long, so a wedged worker is still declared dead.
+  max_loop_stall_s: 30
 
-control_plane:
-  replicas: 1
-
-workers:
-  replicas: 3
+locks:
+  ttl_s: 5

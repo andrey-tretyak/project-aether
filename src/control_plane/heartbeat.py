@@ -6,18 +6,20 @@ from collections.abc import Awaitable, Callable
 
 from redis.asyncio import Redis
 
+from src.common.config import Settings, load_settings
 from src.common.logger import get_logger
 
 log = get_logger("aether.heartbeat")
 
 HEARTBEAT_HASH = "aether:worker_heartbeats"
 LEASE_PREFIX = "aether:lease:"
-POLL_INTERVAL_S = 0.5
-WORKER_TIMEOUT_S = 3.0
-LEASE_TTL_S = 3
 
 
 OnWorkerFailure = Callable[[str], Awaitable[None]]
+
+
+def lease_key(worker_id: str) -> str:
+    return f"{LEASE_PREFIX}{worker_id}"
 
 
 class HeartbeatMonitor:
@@ -27,23 +29,27 @@ class HeartbeatMonitor:
         self,
         redis: Redis,
         on_worker_failure: OnWorkerFailure,
-        timeout_s: float = WORKER_TIMEOUT_S,
-        poll_interval_s: float = POLL_INTERVAL_S,
+        settings: Settings | None = None,
     ):
         self.redis = redis
         self.on_worker_failure = on_worker_failure
-        self.timeout_s = timeout_s
-        self.poll_interval_s = poll_interval_s
+        self.settings = settings or load_settings()
+        self.timeout_s = self.settings.lease_s
+        self.poll_interval_s = self.settings.monitor_poll_s
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
     def _lease_key(self, worker_id: str) -> str:
-        return f"{LEASE_PREFIX}{worker_id}"
+        return lease_key(worker_id)
 
     async def beat(self, worker_id: str) -> None:
         now = str(time.time())
         await self.redis.hset(HEARTBEAT_HASH, worker_id, now)
-        await self.redis.set(self._lease_key(worker_id), "alive", ex=LEASE_TTL_S)
+        await self.redis.set(self._lease_key(worker_id), "alive", px=int(self.settings.lease_s * 1000))
+
+    async def deregister(self, worker_id: str) -> None:
+        await self.redis.delete(self._lease_key(worker_id))
+        await self.redis.hdel(HEARTBEAT_HASH, worker_id)
 
     async def is_alive(self, worker_id: str) -> bool:
         return bool(await self.redis.exists(self._lease_key(worker_id)))
@@ -92,7 +98,7 @@ class HeartbeatMonitor:
                 f"aether:failclaim:{worker_id}",
                 "1",
                 nx=True,
-                ex=10,
+                px=int(self.timeout_s * 1000),
             )
             if not claimed:
                 continue
