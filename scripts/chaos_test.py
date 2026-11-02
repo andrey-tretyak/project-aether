@@ -5,6 +5,9 @@ Exits non-zero unless every task completes exactly once.
                    survivor within the recovery budget derived from the lease.
   --stop-after S   SIGTERM a worker that is mid-task; it must drain (finish its
                    task, exit cleanly) without ever being declared dead.
+  --pause-after S  SIGSTOP a worker that is mid-task, wait until its work is
+                   reassigned, then SIGCONT it; its late write must be rejected
+                   by the fence and the task committed once, by a survivor.
 Unless --allow-false-deaths is passed, any live worker declared dead fails the run.
 Detection and recovery budgets are derived from the configured lease.
 """
@@ -39,6 +42,9 @@ from src.control_plane.wal import WriteAheadLog  # noqa: E402
 logging.getLogger("aether.wal").setLevel(logging.WARNING)
 
 DRAIN_TIMEOUT_S = 10.0
+ZOMBIE_TIMEOUT_S = 10.0
+PAUSE_ATTEMPTS = 5
+STALE_WRITE_EVENTS = {"worker.stale_start", "worker.stale_commit", "worker.stale_fail_commit"}
 
 
 class ChaosFailure(Exception):
@@ -91,12 +97,12 @@ async def _busy_workers(redis: Redis) -> dict[str, list[str]]:
     return busy
 
 
-def _liveness_stats(cp_log: Path, worker_logs: dict[str, Path], killed: Optional[str]) -> dict[str, Any]:
+def _liveness_stats(cp_log: Path, worker_logs: dict[str, Path], expected_dead: Optional[str]) -> dict[str, Any]:
     dead = [e.get("worker_id") for e in _log_events(cp_log) if e.get("msg") == "worker.dead"]
     runs_per_task = Counter(
         e.get("task_id") for path in worker_logs.values() for e in _log_events(path) if e.get("msg") == "worker.claimed"
     )
-    false_deaths = [w for w in dead if w != killed]
+    false_deaths = [w for w in dead if w != expected_dead]
     return {
         "false_deaths": len(false_deaths),
         "false_dead_workers": false_deaths,
@@ -119,6 +125,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
     dag = json.loads(dag_path.read_text())
     workflow_id = dag["workflow_id"]
     killed: Optional[str] = None
+    paused: Optional[str] = None
 
     logdir = Path(tempfile.mkdtemp(prefix="aether-chaos-"))
     env = {**os.environ, "REDIS_URL": args.redis_url, "PYTHONPATH": str(ROOT)}
@@ -147,31 +154,70 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
 
         victim: Optional[str] = None
         victim_tasks: list[str] = []
+        paused_fences: dict[str, int] = {}
         action_wall = action_mono = 0.0
-        action_after = args.kill_after if args.kill_after is not None else args.stop_after
+        action_after = next((s for s in (args.kill_after, args.stop_after, args.pause_after) if s is not None), None)
         if action_after is not None:
             await asyncio.sleep(action_after)
-            state = await wal.recover_latest_state(workflow_id)
-            status = {t.id: t.status for t in state.workflow.tasks}
-            # A worker keeps its lock briefly after committing; only target uncommitted work.
-            candidates = {
-                worker: held
-                for worker, tasks_held in (await _busy_workers(redis)).items()
-                if (held := [t for t in tasks_held if status.get(t) != TaskStatus.COMPLETED])
-            }
-            if not candidates:
-                raise ChaosFailure("no worker was mid-task at that point; use a larger DAG or an earlier time")
-            victim = sorted(candidates)[0]
-            sig = signal.SIGKILL if args.kill_after is not None else signal.SIGTERM
-            procs[victim].send_signal(sig)
-            action_wall, action_mono = time.time(), time.monotonic()
-            victim_tasks = candidates[victim]
-            if sig == signal.SIGKILL:
-                killed = victim
-                procs[victim].wait()
+            for attempt in range(PAUSE_ATTEMPTS):
                 state = await wal.recover_latest_state(workflow_id)
-                victim_tasks = [t for t in victim_tasks if state.workflow.task_map()[t].status != TaskStatus.COMPLETED]
+                status = {t.id: t.status for t in state.workflow.tasks}
+                # A worker keeps its lock briefly after committing; only target uncommitted work.
+                candidates = {
+                    worker: held
+                    for worker, tasks_held in (await _busy_workers(redis)).items()
+                    if (held := [t for t in tasks_held if status.get(t) != TaskStatus.COMPLETED])
+                }
+                if not candidates:
+                    raise ChaosFailure("no worker was mid-task at that point; use a larger DAG or an earlier time")
+                victim = sorted(candidates)[0]
+                if args.kill_after is not None:
+                    sig = signal.SIGKILL
+                elif args.stop_after is not None:
+                    sig = signal.SIGTERM
+                else:
+                    sig = signal.SIGSTOP
+                procs[victim].send_signal(sig)
+                action_wall, action_mono = time.time(), time.monotonic()
+                victim_tasks = candidates[victim]
+                if sig == signal.SIGKILL:
+                    killed = victim
+                    procs[victim].wait()
+                elif sig == signal.SIGSTOP:
+                    paused = victim
+                    paused_fences = {t: await wal.current_fence(t) for t in victim_tasks}
+                    # A commit already on the wire when the signal landed can still reach Redis.
+                    await asyncio.sleep(0.2)
+                if sig in (signal.SIGKILL, signal.SIGSTOP):
+                    state = await wal.recover_latest_state(workflow_id)
+                    victim_tasks = [
+                        t for t in victim_tasks if state.workflow.task_map()[t].status != TaskStatus.COMPLETED
+                    ]
+                if sig != signal.SIGSTOP or victim_tasks or attempt == PAUSE_ATTEMPTS - 1:
+                    break
+                # The pause landed after the commit, so there would be no late write to reject.
+                procs[victim].send_signal(signal.SIGCONT)
+                paused = None
+                await asyncio.sleep(0.3)
             print(f"sent {sig.name} to {victim} while it held {', '.join(candidates[victim])}")
+            if paused and not victim_tasks:
+                raise ChaosFailure(f"every paused worker committed before SIGSTOP landed ({PAUSE_ATTEMPTS} attempts)")
+
+            if paused:
+                async def reassigned() -> bool:
+                    declared = any(
+                        e.get("msg") == "worker.dead" and e.get("worker_id") == paused for e in _log_events(cp_log)
+                    )
+                    if not declared:
+                        return False
+                    for task_id in victim_tasks:
+                        if await wal.current_fence(task_id) <= paused_fences[task_id]:
+                            return False
+                    return True
+
+                await _wait_until(reassigned, detection_budget + 2.0, f"{paused}'s work to be reassigned")
+                procs[paused].send_signal(signal.SIGCONT)
+                print(f"sent SIGCONT to {paused} {time.monotonic() - action_mono:.2f}s later, after its work was reassigned")
 
         recovered_after: Optional[float] = None
         deadline = time.monotonic() + args.timeout
@@ -205,7 +251,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
 
         cp_events = _log_events(cp_log)
         dead_events = [e for e in cp_events if e.get("msg") == "worker.dead"]
-        stats = _liveness_stats(cp_log, worker_logs, killed)
+        stats = _liveness_stats(cp_log, worker_logs, killed or paused)
         metrics.update(
             tasks=len(tasks),
             elapsed_s=round(elapsed, 2),
@@ -219,10 +265,12 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
         if stats["false_deaths"] and not args.allow_false_deaths:
             raise ChaosFailure(f"live workers were declared dead: {stats['false_dead_workers']}")
 
-        if killed:
-            dead = [e for e in dead_events if e.get("worker_id") == killed]
+        if killed or paused:
+            lost = killed or paused
+            how = "SIGKILL" if killed else "SIGSTOP"
+            dead = [e for e in dead_events if e.get("worker_id") == lost]
             if not dead:
-                raise ChaosFailure(f"control plane never declared {killed} dead")
+                raise ChaosFailure(f"control plane never declared {lost} dead")
             detected_after = datetime.fromisoformat(dead[0]["ts"]).timestamp() - action_wall
             metrics["detected_after_s"] = round(detected_after, 2)
             moved = [t for t in victim_tasks if tasks[t].assigned_worker == killed]
@@ -230,17 +278,48 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
                 raise ChaosFailure(f"tasks still attributed to the killed worker: {moved}")
             if detected_after > detection_budget and not args.measure_only:
                 raise ChaosFailure(f"failure detection took {detected_after:.2f}s (budget {detection_budget:.1f}s)")
-            print(f"PASS  {killed} detected dead {detected_after:.2f}s after SIGKILL (budget {detection_budget:.1f}s)")
+            print(f"PASS  {lost} detected dead {detected_after:.2f}s after {how} (budget {detection_budget:.1f}s)")
             if not victim_tasks:
-                print("NOTE  the killed worker committed its task before the signal landed; nothing to recover")
+                print(f"NOTE  {lost} committed its task before the signal landed; nothing to recover")
             elif recovered_after is None or (recovered_after > recovery_budget and not args.measure_only):
                 raise ChaosFailure(f"in-flight work took {recovered_after}s to recover (budget {recovery_budget:.1f}s)")
             else:
+                where = "on a survivor" if killed else "under a new fence"
                 print(
-                    f"PASS  its in-flight work finished on a survivor {recovered_after:.2f}s after SIGKILL "
+                    f"PASS  its in-flight work finished {where} {recovered_after:.2f}s after {how} "
                     f"(budget {recovery_budget:.1f}s)"
                 )
-        elif victim:
+
+        if paused and victim_tasks:
+            def stale_writes() -> list[dict]:
+                return [
+                    e
+                    for e in _log_events(worker_logs[paused])
+                    if e.get("msg") in STALE_WRITE_EVENTS and e.get("task_id") in victim_tasks
+                ]
+
+            async def zombie_rejected() -> bool:
+                return {e["task_id"] for e in stale_writes()} >= set(victim_tasks)
+
+            await _wait_until(zombie_rejected, ZOMBIE_TIMEOUT_S, f"{paused} to attempt its late write after SIGCONT")
+            if procs[paused].poll() is not None:
+                raise ChaosFailure(f"{paused} exited after its write was rejected (code {procs[paused].returncode})")
+            committed = {
+                d["task_id"]: d for d in map(json.loads, raw) if d.get("type") == "task_completed"
+            }
+            for task_id in victim_tasks:
+                commit = committed[task_id]
+                if commit["fence_token"] <= paused_fences[task_id]:
+                    raise ChaosFailure(f"{task_id} was committed with the paused worker's stale fence: {commit}")
+                by = commit["assigned_worker"]
+                if by == paused:
+                    by = f"{paused} itself after it rejoined"
+                print(
+                    f"PASS  {paused} woke up and tried to write {task_id} with fence {paused_fences[task_id]}; "
+                    f"rejected. Committed once, with fence {commit['fence_token']}, by {by}"
+                )
+
+        if args.stop_after is not None and victim:
             try:
                 code = procs[victim].wait(timeout=DRAIN_TIMEOUT_S)
             except subprocess.TimeoutExpired:
@@ -260,6 +339,8 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             print(f"  {line}")
         raise
     finally:
+        if paused and procs[paused].poll() is None:
+            procs[paused].send_signal(signal.SIGCONT)
         for proc in procs.values():
             if proc.poll() is None:
                 proc.terminate()
@@ -269,7 +350,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
         await redis.aclose()
-        stats = _liveness_stats(cp_log, worker_logs, killed)
+        stats = _liveness_stats(cp_log, worker_logs, killed or paused)
         metrics.update(false_deaths=stats["false_deaths"], extra_executions=stats["extra_executions"])
 
 
@@ -280,6 +361,12 @@ def main() -> int:
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--kill-after", type=float, default=None, help="seconds after submit to SIGKILL a busy worker")
     action.add_argument("--stop-after", type=float, default=None, help="seconds after submit to SIGTERM a busy worker")
+    action.add_argument(
+        "--pause-after",
+        type=float,
+        default=None,
+        help="seconds after submit to SIGSTOP a busy worker, resuming it once its work is reassigned",
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--redis-url", default=os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
     parser.add_argument(

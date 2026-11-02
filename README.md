@@ -79,7 +79,7 @@ The lease expires (1.5s). The control plane bumps the fence, sets the task back 
 Each reassignment counts as a retry. After 3, the task is marked `FAILED` (with the reason in the WAL) and the workflow stops, instead of a poison task taking down the whole fleet one worker at a time.
 
 **What happens if the dead worker wakes up and writes?**  
-`WriteAheadLog.append_delta` compares the commit’s `fence_token` to `aether:fence:{task_id}`. A higher fence → `StaleFenceError`. The late write never lands.
+`WriteAheadLog.append_delta` compares the commit’s `fence_token` to `aether:fence:{task_id}`. A higher fence → `StaleFenceError`. The late write never lands. The chaos test does exactly this with real processes: it freezes a busy worker with `SIGSTOP`, waits until the control plane has declared it dead and reassigned its task, then resumes it with `SIGCONT` and requires its write to be rejected and the task committed once, under the new fence. The resumed worker then rejoins and picks up new work.
 
 **Do we re-call the model on recovery?**  
 No. `recover_latest_state` loads the latest snapshot and replays deltas. LLM/tool output is data in the log. Replay is deterministic even when the original step was not.
@@ -174,7 +174,7 @@ scripts/chaos_test.py           real control plane + workers against live Redis
 scripts/lease_sweep.py          lease length x heartbeat mode under loop stalls
 ```
 
-Unit tests use `fakeredis`. The chaos test starts the actual processes, optionally `SIGKILL`s a worker that is mid-task, and fails unless every task commits exactly once, no live worker is declared dead, and the killed worker is detected and its work finished within budgets derived from the lease (2.5s and 3.5s at the default):
+Unit tests use `fakeredis`. The chaos test starts the actual processes, optionally kills, drains, or freezes a worker that is mid-task, and fails unless every task commits exactly once, no live worker is declared dead, and the killed worker is detected and its work finished within budgets derived from the lease (2.5s and 3.5s at the default):
 
 ```sh
 redis-server --daemonize yes
@@ -190,7 +190,20 @@ PASS  its in-flight work finished on a survivor 1.78s after SIGKILL (budget 3.5s
 
 The re-executed task is the one the killed worker held, run again on a survivor: at-least-once execution, one commit.
 
-CI runs the unit tests, then the chaos test four ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, and a `SIGTERM` drain.
+`--pause-after 2` runs the zombie-writer case: the worker is frozen instead of killed, and comes back after its task has been reassigned:
+
+```
+sent SIGSTOP to worker-1 while it held step-18
+sent SIGCONT to worker-1 2.04s later, after its work was reassigned
+PASS  61 tasks, 3 workers, completed in 7.05s, one commit per task, 1 re-executed
+PASS  worker-1 detected dead 1.99s after SIGSTOP (budget 2.5s)
+PASS  its in-flight work finished under a new fence 2.05s after SIGSTOP (budget 3.5s)
+PASS  worker-1 woke up and tried to write step-18 with fence 1; rejected. Committed once, with fence 3, by worker-3
+```
+
+The fence jumps from 1 to 3 because reassignment and redispatch each bump it: the old holder is invalidated as soon as it is declared dead, before the task is handed out again.
+
+CI runs the unit tests, then the chaos test five ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, and a `SIGSTOP`/`SIGCONT` zombie writer.
 
 ---
 

@@ -46,3 +46,5 @@ jobs:
         run: python scripts/chaos_test.py --kill-after 2
       - name: SIGTERM a busy worker (graceful drain)
         run: python scripts/chaos_test.py --stop-after 2
+      - name: SIGSTOP a busy worker, resume it after reassignment (zombie writer)
+        run: python scripts/chaos_test.py --pause-after 2
