@@ -8,6 +8,13 @@ Exits non-zero unless every task completes exactly once.
   --pause-after S  SIGSTOP a worker that is mid-task, wait until its work is
                    reassigned, then SIGCONT it; its late write must be rejected
                    by the fence and the task committed once, by a survivor.
+  --kill-leader-after S
+                   SIGKILL the leading control plane (needs --control-planes 2+);
+                   a standby must take over and finish the workflow.
+  --pause-leader-after S
+                   SIGSTOP the leader until a standby takes over, then SIGCONT it;
+                   it must step down, and no write from its epoch may land after
+                   the new leader's first.
 Unless --allow-false-deaths is passed, any live worker declared dead fails the run.
 Detection and recovery budgets are derived from the configured lease.
 """
@@ -37,6 +44,7 @@ from redis.asyncio import Redis  # noqa: E402
 from src.common.config import load_settings  # noqa: E402
 from src.common.models import TaskStatus  # noqa: E402
 from src.control_plane.heartbeat import HEARTBEAT_HASH  # noqa: E402
+from src.control_plane.leader import LEADER_KEY  # noqa: E402
 from src.control_plane.wal import WriteAheadLog  # noqa: E402
 
 logging.getLogger("aether.wal").setLevel(logging.WARNING)
@@ -62,15 +70,16 @@ def _spawn(args: list[str], env: dict[str, str], log_path: Path) -> subprocess.P
     )
 
 
-def _log_events(log_path: Path) -> list[dict]:
+def _log_events(*log_paths: Path) -> list[dict]:
     events = []
-    for line in log_path.read_text().splitlines():
-        if line.startswith("{"):
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return events
+    for log_path in log_paths:
+        for line in log_path.read_text().splitlines():
+            if line.startswith("{"):
+                try:
+                    events.append({**json.loads(line), "_log": log_path.stem})
+                except json.JSONDecodeError:
+                    continue
+    return sorted(events, key=lambda e: e.get("ts", ""))
 
 
 async def _clear_aether_keys(redis: Redis) -> None:
@@ -97,8 +106,8 @@ async def _busy_workers(redis: Redis) -> dict[str, list[str]]:
     return busy
 
 
-def _liveness_stats(cp_log: Path, worker_logs: dict[str, Path], expected_dead: Optional[str]) -> dict[str, Any]:
-    dead = [e.get("worker_id") for e in _log_events(cp_log) if e.get("msg") == "worker.dead"]
+def _liveness_stats(cp_logs: list[Path], worker_logs: dict[str, Path], expected_dead: Optional[str]) -> dict[str, Any]:
+    dead = [e.get("worker_id") for e in _log_events(*cp_logs) if e.get("msg") == "worker.dead"]
     runs_per_task = Counter(
         e.get("task_id") for path in worker_logs.values() for e in _log_events(path) if e.get("msg") == "worker.claimed"
     )
@@ -114,6 +123,8 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
     settings = load_settings()
     detection_budget = settings.lease_s + settings.monitor_poll_s + 0.5
     recovery_budget = detection_budget + 1.0
+    # Lease expiry, one campaign poll, then one reconcile pass to pick the work back up.
+    failover_budget = settings.leader_lease_s * 1.25 + 1.0
     metrics.update(lease_s=settings.lease_s, heartbeat_mode=settings.heartbeat_mode)
 
     redis = Redis.from_url(args.redis_url, decode_responses=True)
@@ -130,16 +141,25 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
     logdir = Path(tempfile.mkdtemp(prefix="aether-chaos-"))
     env = {**os.environ, "REDIS_URL": args.redis_url, "PYTHONPATH": str(ROOT)}
     procs: dict[str, subprocess.Popen] = {}
-    cp_log = logdir / "control-plane.log"
+    cp_named = {f"control-plane-{i}": logdir / f"control-plane-{i}.log" for i in range(1, args.control_planes + 1)}
+    cp_logs = list(cp_named.values())
     worker_logs = {f"worker-{i}": logdir / f"worker-{i}.log" for i in range(1, args.workers + 1)}
-    procs["control-plane"] = _spawn(["control-plane"], env, cp_log)
+    for node_id, log_path in cp_named.items():
+        procs[node_id] = _spawn(["control-plane"], {**env, "CONTROL_PLANE_ID": node_id}, log_path)
     for worker_id, log_path in worker_logs.items():
         procs[worker_id] = _spawn(["worker"], {**env, "WORKER_ID": worker_id}, log_path)
+    old_leader: Optional[str] = None
 
     try:
         async def cluster_ready() -> bool:
-            started = any(e.get("msg") == "control_plane.started" for e in _log_events(cp_log))
-            return started and await redis.hlen(HEARTBEAT_HASH) >= args.workers
+            events = _log_events(*cp_logs)
+            started = any(e.get("msg") == "control_plane.started" for e in events)
+            campaigning = {e["_log"] for e in events if e.get("msg") == "control_plane.standby"}
+            return (
+                started
+                and len(campaigning) == args.control_planes
+                and await redis.hlen(HEARTBEAT_HASH) >= args.workers
+            )
 
         await _wait_until(cluster_ready, 20, "control plane and workers to start")
 
@@ -206,7 +226,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             if paused:
                 async def reassigned() -> bool:
                     declared = any(
-                        e.get("msg") == "worker.dead" and e.get("worker_id") == paused for e in _log_events(cp_log)
+                        e.get("msg") == "worker.dead" and e.get("worker_id") == paused for e in _log_events(*cp_logs)
                     )
                     if not declared:
                         return False
@@ -218,6 +238,42 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
                 await _wait_until(reassigned, detection_budget + 2.0, f"{paused}'s work to be reassigned")
                 procs[paused].send_signal(signal.SIGCONT)
                 print(f"sent SIGCONT to {paused} {time.monotonic() - action_mono:.2f}s later, after its work was reassigned")
+
+        leader_after = args.kill_leader_after if args.kill_leader_after is not None else args.pause_leader_after
+        leader_sig = signal.SIGKILL if args.kill_leader_after is not None else signal.SIGSTOP
+        new_leader: Optional[str] = None
+        old_epoch = new_epoch = 0
+        failover_after = 0.0
+        if leader_after is not None:
+            await asyncio.sleep(leader_after)
+            token = await redis.get(LEADER_KEY)
+            if not token:
+                raise ChaosFailure("no control plane held the leader lease")
+            old_leader, _, epoch = token.rpartition(":")
+            old_epoch = int(epoch)
+            procs[old_leader].send_signal(leader_sig)
+            action_wall = time.time()
+            if leader_sig == signal.SIGKILL:
+                procs[old_leader].wait()
+            print(f"sent {leader_sig.name} to {old_leader}, the leader (epoch {old_epoch})")
+
+            def elections() -> list[dict]:
+                return [
+                    e
+                    for e in _log_events(*cp_logs)
+                    if e.get("msg") == "control_plane.elected" and int(e.get("epoch", 0)) > old_epoch
+                ]
+
+            async def taken_over() -> bool:
+                return bool(elections())
+
+            await _wait_until(taken_over, failover_budget + 5.0, "a standby to take over")
+            first = elections()[0]
+            new_leader, new_epoch = first["node_id"], int(first["epoch"])
+            failover_after = datetime.fromisoformat(first["ts"]).timestamp() - action_wall
+            if leader_sig == signal.SIGSTOP:
+                procs[old_leader].send_signal(signal.SIGCONT)
+                print(f"sent SIGCONT to {old_leader} after {new_leader} took over")
 
         recovered_after: Optional[float] = None
         deadline = time.monotonic() + args.timeout
@@ -249,9 +305,9 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
         if duplicates or len(commits) != len(tasks):
             raise ChaosFailure(f"expected exactly one commit per task; got {dict(commits)}")
 
-        cp_events = _log_events(cp_log)
+        cp_events = _log_events(*cp_logs)
         dead_events = [e for e in cp_events if e.get("msg") == "worker.dead"]
-        stats = _liveness_stats(cp_log, worker_logs, killed or paused)
+        stats = _liveness_stats(cp_logs, worker_logs, killed or paused)
         metrics.update(
             tasks=len(tasks),
             elapsed_s=round(elapsed, 2),
@@ -264,6 +320,52 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
         )
         if stats["false_deaths"] and not args.allow_false_deaths:
             raise ChaosFailure(f"live workers were declared dead: {stats['false_dead_workers']}")
+
+        if old_leader:
+            metrics["failover_after_s"] = round(failover_after, 2)
+            if failover_after > failover_budget and not args.measure_only:
+                raise ChaosFailure(f"failover took {failover_after:.2f}s (budget {failover_budget:.1f}s)")
+            print(
+                f"PASS  {new_leader} took over as epoch {new_epoch} {failover_after:.2f}s after "
+                f"{leader_sig.name} (budget {failover_budget:.1f}s)"
+            )
+            deltas = [json.loads(d) for d in raw]
+            first_new = next((i for i, d in enumerate(deltas) if d.get("leader_epoch") == new_epoch), None)
+            if first_new is None:
+                raise ChaosFailure(f"the new leader (epoch {new_epoch}) never wrote to the WAL")
+            late = [d for d in deltas[first_new:] if d.get("leader_epoch") is not None and d["leader_epoch"] < new_epoch]
+            if late:
+                raise ChaosFailure(f"{len(late)} writes from a deposed leader landed after the new leader's: {late[:3]}")
+            old_writes = sum(1 for d in deltas[:first_new] if d.get("leader_epoch") == old_epoch)
+            print(
+                f"PASS  WAL: {old_writes} writes from epoch {old_epoch}, then only epoch {new_epoch}; "
+                "nothing from the old leader landed after the takeover"
+            )
+
+            if leader_sig == signal.SIGSTOP:
+                old_log = cp_named[old_leader]
+
+                def after_takeover(msg: str) -> list[dict]:
+                    return [
+                        e
+                        for e in _log_events(old_log)
+                        if e.get("msg") == msg and datetime.fromisoformat(e["ts"]).timestamp() > action_wall
+                    ]
+
+                async def back_on_standby() -> bool:
+                    return bool(after_takeover("control_plane.lost_leadership")) and bool(
+                        after_takeover("control_plane.standby")
+                    )
+
+                await _wait_until(back_on_standby, ZOMBIE_TIMEOUT_S, f"{old_leader} to step down after SIGCONT")
+                if procs[old_leader].poll() is not None:
+                    raise ChaosFailure(f"{old_leader} exited instead of standing by")
+                reason = after_takeover("control_plane.lost_leadership")[0].get("reason")
+                rejected = len(after_takeover("control_plane.write_rejected"))
+                print(
+                    f"PASS  {old_leader} woke up, stepped down ({reason}, late writes rejected: {rejected}) "
+                    "and is standing by"
+                )
 
         if killed or paused:
             lost = killed or paused
@@ -335,12 +437,15 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             print(f"PASS  {victim} drained: finished {', '.join(victim_tasks)} itself, exited 0, nothing reassigned")
     except Exception:
         print(f"logs: {logdir}")
-        for line in cp_log.read_text().splitlines()[-30:]:
-            print(f"  {line}")
+        for log_path in cp_logs:
+            print(f"  [{log_path.stem}]")
+            for line in log_path.read_text().splitlines()[-30 // len(cp_logs):]:
+                print(f"  {line}")
         raise
     finally:
-        if paused and procs[paused].poll() is None:
-            procs[paused].send_signal(signal.SIGCONT)
+        for name in (paused, old_leader):
+            if name and procs[name].poll() is None:
+                procs[name].send_signal(signal.SIGCONT)
         for proc in procs.values():
             if proc.poll() is None:
                 proc.terminate()
@@ -350,7 +455,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
         await redis.aclose()
-        stats = _liveness_stats(cp_log, worker_logs, killed or paused)
+        stats = _liveness_stats(cp_logs, worker_logs, killed or paused)
         metrics.update(false_deaths=stats["false_deaths"], extra_executions=stats["extra_executions"])
 
 
@@ -358,6 +463,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dag", default=str(ROOT / "chaos_dag.json"))
     parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--control-planes", type=int, default=1, help="one leads, the rest stand by")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--kill-after", type=float, default=None, help="seconds after submit to SIGKILL a busy worker")
     action.add_argument("--stop-after", type=float, default=None, help="seconds after submit to SIGTERM a busy worker")
@@ -366,6 +472,13 @@ def main() -> int:
         type=float,
         default=None,
         help="seconds after submit to SIGSTOP a busy worker, resuming it once its work is reassigned",
+    )
+    action.add_argument("--kill-leader-after", type=float, default=None, help="seconds after submit to SIGKILL the leader")
+    action.add_argument(
+        "--pause-leader-after",
+        type=float,
+        default=None,
+        help="seconds after submit to SIGSTOP the leader, resuming it once a standby takes over",
     )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--redis-url", default=os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
@@ -384,6 +497,8 @@ def main() -> int:
     )
     parser.add_argument("--json", type=Path, default=None, help="write run metrics to this file")
     args = parser.parse_args()
+    if (args.kill_leader_after is not None or args.pause_leader_after is not None) and args.control_planes < 2:
+        parser.error("leader failover needs --control-planes 2 or more")
 
     for item in args.set:
         key, _, value = item.partition("=")

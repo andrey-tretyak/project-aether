@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.asyncio.client import Pipeline
 from redis.exceptions import WatchError
 
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
+from src.control_plane.leader import LEADER_KEY, LeaderElection, NotLeaderError
 
 log = get_logger("aether.wal")
 
@@ -17,10 +20,17 @@ class StaleFenceError(Exception):
 
 
 class WriteAheadLog:
-    """Redis-backed append-only WAL with snapshot + replay recovery."""
+    """Redis-backed append-only WAL with snapshot + replay recovery.
 
-    def __init__(self, redis: Redis):
+    With `leader` set (the control plane), every write checks the leader token in the
+    same transaction and raises NotLeaderError if this node has been deposed, and each
+    delta records the leader's epoch. Workers pass no leader; their commits are guarded
+    by the task's fence instead.
+    """
+
+    def __init__(self, redis: Redis, leader: LeaderElection | None = None):
         self.redis = redis
+        self.leader = leader
 
     def _wal_key(self, workflow_id: str) -> str:
         return f"aether:wal:{workflow_id}"
@@ -36,46 +46,83 @@ class WriteAheadLog:
         return int(raw) if raw is not None else 0
 
     async def bump_fence(self, task_id: str) -> int:
-        return int(await self.redis.incr(self._fence_key(task_id)))
+        if self.leader is None:
+            return int(await self.redis.incr(self._fence_key(task_id)))
+        (fence,) = await self._transact([], lambda pipe: pipe.incr(self._fence_key(task_id)))
+        return int(fence)
 
-    async def append_delta(self, workflow_id: str, delta: dict[str, Any]) -> int:
-        """Append an immutable state delta. Rejects stale fence tokens."""
+    async def append_delta(
+        self,
+        workflow_id: str,
+        delta: dict[str, Any],
+        also: Callable[[Pipeline], Any] | None = None,
+    ) -> int:
+        """Append an immutable state delta. Rejects stale fence tokens.
+
+        `also` queues extra commands into the same transaction, so they happen if and
+        only if the delta is appended.
+        """
         task_id = delta.get("task_id")
         fence = delta.get("fence_token")
+        if self.leader is not None:
+            delta = {**delta, "leader_epoch": self.leader.epoch}
         payload = json.dumps(delta)
+        wal_key = self._wal_key(workflow_id)
+
+        def append(pipe: Pipeline) -> None:
+            pipe.rpush(wal_key, payload)
+            if also is not None:
+                also(pipe)
+
         try:
             if task_id is None or fence is None:
-                seq = await self.redis.rpush(self._wal_key(workflow_id), payload)
+                if self.leader is None and also is None:
+                    seq = await self.redis.rpush(wal_key, payload)
+                else:
+                    seq, *_ = await self._transact([], append)
             else:
-                seq = await self._fenced_append(workflow_id, str(task_id), int(fence), payload)
+                seq, *_ = await self._transact([(str(task_id), int(fence))], append)
             log.info(
                 "wal.append",
                 extra={"extra_fields": {"workflow_id": workflow_id, "seq": seq}},
             )
             return int(seq)
-        except StaleFenceError:
+        except (StaleFenceError, NotLeaderError):
             raise
         except Exception:
             log.exception("wal.append_failed", extra={"extra_fields": {"workflow_id": workflow_id}})
             raise
 
-    async def _fenced_append(self, workflow_id: str, task_id: str, fence: int, payload: str) -> int:
-        # WATCH aborts the append if the fence is bumped between the check and the RPUSH.
-        fence_key = self._fence_key(task_id)
+    async def _transact(
+        self, fences: list[tuple[str, int]], queue: Callable[[Pipeline], Any]
+    ) -> list[Any]:
+        """Run `queue`'s commands in one MULTI, after checking each (task, fence) is current
+        and, for a control plane, that it still holds the leader lease. WATCH aborts the
+        transaction if any of those keys change between the check and EXEC."""
+        watched = [self._fence_key(task_id) for task_id, _ in fences]
+        if self.leader is not None:
+            watched.append(LEADER_KEY)
         async with self.redis.pipeline(transaction=True) as pipe:
             while True:
                 try:
-                    await pipe.watch(fence_key)
-                    raw = await pipe.get(fence_key)
-                    current = int(raw) if raw is not None else 0
-                    if current > fence:
-                        raise StaleFenceError(
-                            f"stale fence for {task_id}: got {fence}, current {current}"
-                        )
+                    if watched:
+                        await pipe.watch(*watched)
+                    for task_id, fence in fences:
+                        raw = await pipe.get(self._fence_key(task_id))
+                        current = int(raw) if raw is not None else 0
+                        if current > fence:
+                            raise StaleFenceError(
+                                f"stale fence for {task_id}: got {fence}, current {current}"
+                            )
+                    if self.leader is not None:
+                        holder = await pipe.get(LEADER_KEY)
+                        if isinstance(holder, bytes):
+                            holder = holder.decode()
+                        if holder != self.leader.token:
+                            raise NotLeaderError(f"leader is {holder!r}, not {self.leader.token!r}")
                     pipe.multi()
-                    pipe.rpush(self._wal_key(workflow_id), payload)
-                    (seq,) = await pipe.execute()
-                    return int(seq)
+                    queue(pipe)
+                    return await pipe.execute()
                 except WatchError:
                     continue
 
@@ -83,11 +130,16 @@ class WriteAheadLog:
         """Persist a snapshot. `wal_index` must be the number of WAL entries the snapshot reflects."""
         try:
             payload = json.dumps({"wal_index": wal_index, "state": state_snapshot})
-            await self.redis.set(self._snap_key(workflow_id), payload)
+            if self.leader is None:
+                await self.redis.set(self._snap_key(workflow_id), payload)
+            else:
+                await self._transact([], lambda pipe: pipe.set(self._snap_key(workflow_id), payload))
             log.info(
                 "wal.checkpoint",
                 extra={"extra_fields": {"workflow_id": workflow_id, "wal_index": wal_index}},
             )
+        except NotLeaderError:
+            raise
         except Exception:
             log.exception("wal.checkpoint_failed", extra={"extra_fields": {"workflow_id": workflow_id}})
             raise
