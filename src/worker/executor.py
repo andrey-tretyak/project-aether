@@ -7,35 +7,72 @@ import socket
 import time
 from typing import Any
 
+from redis import Redis as SyncRedis
 from redis.asyncio import Redis
 
+from src.common.config import Settings, load_settings
 from src.common.logger import get_logger
 from src.common.models import TaskStatus
 from src.control_plane.heartbeat import HeartbeatMonitor
-from src.control_plane.scheduler import TASK_OWNER_PREFIX, TASK_QUEUE
+from src.control_plane.scheduler import RESULTS_CHANNEL, TASK_OWNER_PREFIX, TASK_QUEUE
 from src.control_plane.wal import StaleFenceError, WriteAheadLog
+from src.worker.heartbeat_thread import HeartbeatThread
 from src.worker.mock_agent import run_mock_agent
 
 log = get_logger("aether.worker")
 
 LOCK_PREFIX = "aether:lock:"
-LOCK_TTL_S = 5
 
 
 class WorkerExecutor:
-    def __init__(self, redis: Redis, worker_id: str | None = None):
+    def __init__(
+        self,
+        redis: Redis,
+        worker_id: str | None = None,
+        heartbeat_client: SyncRedis | None = None,
+        settings: Settings | None = None,
+    ):
         self.redis = redis
         self.worker_id = worker_id or os.environ.get("WORKER_ID") or _default_worker_id()
+        self.settings = settings or load_settings()
         self.wal = WriteAheadLog(redis)
-        self.heartbeat = HeartbeatMonitor(redis, self._ignore_failure)
+        self.heartbeat = HeartbeatMonitor(redis, self._ignore_failure, self.settings)
+        self.heartbeat_client = heartbeat_client
+        self._lock_ttl_ms = int(self.settings.lock_ttl_s * 1000)
+        self._last_loop_tick = time.monotonic()
         self._stop = asyncio.Event()
 
     async def _ignore_failure(self, worker_id: str) -> None:
         return None
 
     async def run(self) -> None:
-        log.info("worker.started", extra={"extra_fields": {"worker_id": self.worker_id}})
-        beater = asyncio.create_task(self._heartbeat_loop(), name="worker-heartbeat")
+        log.info(
+            "worker.started",
+            extra={
+                "extra_fields": {
+                    "worker_id": self.worker_id,
+                    "heartbeat_mode": self.settings.heartbeat_mode,
+                    "lease_s": self.settings.lease_s,
+                }
+            },
+        )
+        background: list[asyncio.Task[None]] = []
+        thread: HeartbeatThread | None = None
+        if self.settings.heartbeat_mode == "thread":
+            if self.heartbeat_client is None:
+                raise ValueError("thread heartbeat mode needs a synchronous Redis client")
+            thread = HeartbeatThread(
+                self.heartbeat_client,
+                self.worker_id,
+                self.settings.heartbeat_interval_s,
+                self.settings.lease_s,
+                lambda: self._last_loop_tick,
+                self.settings.max_loop_stall_s,
+            )
+            thread.start()
+            background.append(asyncio.create_task(self._tick_loop(), name="worker-loop-tick"))
+        else:
+            background.append(asyncio.create_task(self._heartbeat_loop(), name="worker-heartbeat"))
         try:
             while not self._stop.is_set():
                 item = await self.redis.brpop(TASK_QUEUE, timeout=1)
@@ -49,14 +86,30 @@ class WorkerExecutor:
                 await self._execute(envelope)
         finally:
             self._stop.set()
-            beater.cancel()
-            try:
-                await beater
-            except asyncio.CancelledError:
-                pass
+            for task in background:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if thread is not None:
+                thread.stop()
+            await self.heartbeat.deregister(self.worker_id)
+            log.info("worker.deregistered", extra={"extra_fields": {"worker_id": self.worker_id}})
+
+    def request_stop(self) -> None:
+        """Drain: finish the current task, take no new ones, then give up the lease."""
+        if not self._stop.is_set():
+            log.info("worker.draining", extra={"extra_fields": {"worker_id": self.worker_id}})
+        self._stop.set()
 
     async def stop(self) -> None:
-        self._stop.set()
+        self.request_stop()
+
+    async def _tick_loop(self) -> None:
+        while not self._stop.is_set():
+            self._last_loop_tick = time.monotonic()
+            await asyncio.sleep(self.settings.heartbeat_interval_s)
 
     async def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
@@ -65,7 +118,7 @@ class WorkerExecutor:
             except Exception:
                 log.exception("worker.heartbeat_failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=0.5)
+                await asyncio.wait_for(self._stop.wait(), timeout=self.settings.heartbeat_interval_s)
             except asyncio.TimeoutError:
                 continue
 
@@ -83,7 +136,7 @@ class WorkerExecutor:
 
         lock_key = f"{LOCK_PREFIX}{task_id}"
         token = f"{self.worker_id}:{fence}"
-        acquired = await self.redis.set(lock_key, token, nx=True, ex=LOCK_TTL_S)
+        acquired = await self.redis.set(lock_key, token, nx=True, px=self._lock_ttl_ms)
         if not acquired:
             held = await self.redis.get(lock_key)
             log.info(
@@ -124,7 +177,7 @@ class WorkerExecutor:
                 "result": result,
             }
             await self.wal.append_delta(workflow_id, delta)
-            await self.redis.publish("aether:results", json.dumps(delta))
+            await self.redis.publish(RESULTS_CHANNEL, json.dumps(delta))
         except StaleFenceError:
             log.info("worker.stale_commit", extra={"extra_fields": {"task_id": task_id, "fence": fence}})
         except Exception as exc:
@@ -139,7 +192,7 @@ class WorkerExecutor:
             }
             try:
                 await self.wal.append_delta(workflow_id, delta)
-                await self.redis.publish("aether:results", json.dumps(delta))
+                await self.redis.publish(RESULTS_CHANNEL, json.dumps(delta))
             except StaleFenceError:
                 log.info("worker.stale_fail_commit", extra={"extra_fields": {"task_id": task_id}})
         finally:
@@ -153,12 +206,12 @@ class WorkerExecutor:
                 await self.redis.delete(lock_key)
 
     async def _refresh_lock(self, lock_key: str, token: str) -> None:
-        while not self._stop.is_set():
-            await asyncio.sleep(LOCK_TTL_S / 2)
+        while True:
+            await asyncio.sleep(self.settings.lock_ttl_s / 2)
             held = await self.redis.get(lock_key)
             if held != token:
                 return
-            await self.redis.expire(lock_key, LOCK_TTL_S)
+            await self.redis.pexpire(lock_key, self._lock_ttl_ms)
 
 
 def _default_worker_id() -> str:

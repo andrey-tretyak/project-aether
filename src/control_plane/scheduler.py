@@ -9,36 +9,47 @@ from redis.asyncio import Redis
 
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
-from src.control_plane.heartbeat import WORKER_TIMEOUT_S, HeartbeatMonitor
+from src.common.config import Settings, load_settings
+from src.control_plane.heartbeat import HeartbeatMonitor
 from src.control_plane.wal import WriteAheadLog
 
 log = get_logger("aether.scheduler")
 
 TASK_QUEUE = "aether:queue:tasks"
+RESULTS_CHANNEL = "aether:results"
 ACTIVE_WORKFLOWS = "aether:workflows:active"
 TASK_OWNER_PREFIX = "aether:task_owner:"
 MAX_RETRIES = 3
+RECONCILE_INTERVAL_S = 1.0
 
 
 class Scheduler:
-    """DAG resolver and state machine. Dispatches ready tasks onto the Redis queue."""
+    """DAG resolver and state machine. Dispatches ready tasks onto the Redis queue.
 
-    def __init__(self, redis: Redis):
+    The control plane is the only dispatcher, and every state transition it makes
+    (worker result, dead worker, orphan reclaim, reconcile) runs under one lock, so
+    each transition starts from the latest WAL state and two of them never race to
+    bump the same task's fence.
+    """
+
+    def __init__(self, redis: Redis, settings: Settings | None = None):
         self.redis = redis
+        self.settings = settings or load_settings()
         self.wal = WriteAheadLog(redis)
-        self.heartbeat = HeartbeatMonitor(redis, self.on_worker_failure)
+        self.heartbeat = HeartbeatMonitor(redis, self.on_worker_failure, self.settings)
+        self._transitions = asyncio.Lock()
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
         self._stop.clear()
         await self.heartbeat.start()
-        self._orphan_task = asyncio.create_task(self._orphan_loop(), name="orphan-reclaim")
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="reconcile")
         log.info("control_plane.started")
 
     async def stop(self) -> None:
         self._stop.set()
         await self.heartbeat.stop()
-        task = getattr(self, "_orphan_task", None)
+        task = getattr(self, "_reconcile_task", None)
         if task:
             task.cancel()
             try:
@@ -46,18 +57,33 @@ class Scheduler:
             except asyncio.CancelledError:
                 pass
 
-    async def _orphan_loop(self) -> None:
+    async def _reconcile_loop(self) -> None:
+        """Reclaim orphans and dispatch anything ready that no event has dispatched yet.
+
+        Also how the control plane catches up after a restart or a missed wake-up message.
+        """
         while not self._stop.is_set():
             try:
                 await self._reclaim_orphans()
+                for workflow_id in await self._active_workflow_ids():
+                    async with self._transitions:
+                        await self._advance(workflow_id)
             except Exception:
-                log.exception("scheduler.orphan_scan_failed")
+                log.exception("scheduler.reconcile_failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=RECONCILE_INTERVAL_S)
             except asyncio.TimeoutError:
                 continue
 
-    async def submit_workflow(self, workflow: DAGWorkflow) -> None:
+    async def _active_workflow_ids(self) -> list[str]:
+        return [
+            raw.decode() if isinstance(raw, bytes) else str(raw)
+            for raw in await self.redis.smembers(ACTIVE_WORKFLOWS)
+        ]
+
+    async def submit_workflow(self, workflow: DAGWorkflow, dispatch: bool = True) -> None:
+        """Record a workflow. With dispatch=False (clients outside the control plane),
+        only wake the control plane, which then dispatches."""
         missing = workflow.missing_dependencies()
         if missing:
             raise ValueError(f"unknown dependencies: {missing}")
@@ -72,7 +98,14 @@ class Scheduler:
             workflow.workflow_id, {"workflow": workflow.model_dump(mode="json")}, wal_index=seq
         )
         await self.redis.sadd(ACTIVE_WORKFLOWS, workflow.workflow_id)
-        await self._dispatch_ready(workflow)
+        if dispatch:
+            async with self._transitions:
+                await self._advance(workflow.workflow_id)
+        else:
+            await self.redis.publish(
+                RESULTS_CHANNEL,
+                json.dumps({"type": "workflow_submitted", "workflow_id": workflow.workflow_id}),
+            )
 
     async def _checkpoint(self, recovered: WorkflowState) -> None:
         await self.wal.checkpoint(
@@ -105,29 +138,29 @@ class Scheduler:
         await self._dispatch_ready(workflow)
 
     async def apply_task_update(self, delta: dict[str, Any]) -> None:
-        """Wake after a worker WAL commit."""
-        await self._advance(str(delta["workflow_id"]))
+        """Wake after a worker WAL commit or a client submission."""
+        async with self._transitions:
+            await self._advance(str(delta["workflow_id"]))
 
     async def on_worker_failure(self, worker_id: str) -> None:
         """Reassign RUNNING tasks owned by a dead worker with a new fence token."""
-        workflow_ids = await self.redis.smembers(ACTIVE_WORKFLOWS)
-        for raw_id in workflow_ids:
-            workflow_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
-            recovered = await self.wal.recover_latest_state(workflow_id)
-            if recovered is None:
-                continue
-            workflow = recovered.workflow
-            reassigned = False
-            for task in workflow.tasks:
-                if task.status != TaskStatus.RUNNING:
+        async with self._transitions:
+            for workflow_id in await self._active_workflow_ids():
+                recovered = await self.wal.recover_latest_state(workflow_id)
+                if recovered is None:
                     continue
-                owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}")
-                if task.assigned_worker != worker_id and owner != worker_id:
-                    continue
-                await self._requeue_task(workflow, task.id, reason="worker_dead", worker_id=worker_id)
-                reassigned = True
-            if reassigned:
-                await self._advance(workflow_id)
+                workflow = recovered.workflow
+                reassigned = False
+                for task in workflow.tasks:
+                    if task.status != TaskStatus.RUNNING:
+                        continue
+                    owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}")
+                    if task.assigned_worker != worker_id and owner != worker_id:
+                        continue
+                    await self._requeue_task(workflow, task.id, reason="worker_dead", worker_id=worker_id)
+                    reassigned = True
+                if reassigned:
+                    await self._advance(workflow_id)
 
     async def _dispatch_ready(self, workflow: DAGWorkflow) -> None:
         for task in workflow.ready_tasks():
@@ -216,44 +249,45 @@ class Scheduler:
 
     async def _reclaim_orphans(self) -> None:
         """Requeue RUNNING tasks that no live worker holds and that are no longer waiting in the queue."""
-        workflow_ids = await self.redis.smembers(ACTIVE_WORKFLOWS)
-        if not workflow_ids:
-            return
-        queued = await self._queued_envelopes()
-        for raw_id in workflow_ids:
-            workflow_id = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
-            recovered = await self.wal.recover_latest_state(workflow_id)
-            if recovered is None:
-                continue
-            workflow = recovered.workflow
-            changed = False
-            for task in workflow.tasks:
-                if task.status != TaskStatus.RUNNING:
+        async with self._transitions:
+            workflow_ids = await self._active_workflow_ids()
+            if not workflow_ids:
+                return
+            queued = await self._queued_envelopes()
+            for workflow_id in workflow_ids:
+                recovered = await self.wal.recover_latest_state(workflow_id)
+                if recovered is None:
                     continue
-                if (task.id, task.fence_token) in queued:
-                    continue
-                owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}") or task.assigned_worker
-                if owner:
-                    if await self.heartbeat.is_alive(owner):
+                workflow = recovered.workflow
+                changed = False
+                for task in workflow.tasks:
+                    if task.status != TaskStatus.RUNNING:
                         continue
-                    await self._requeue_task(workflow, task.id, reason="orphan_dead_owner")
+                    if (task.id, task.fence_token) in queued:
+                        continue
+                    owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}") or task.assigned_worker
+                    if owner:
+                        if await self.heartbeat.is_alive(owner):
+                            continue
+                        await self._requeue_task(workflow, task.id, reason="orphan_dead_owner")
+                        changed = True
+                        continue
+                    if await self.redis.exists(f"aether:lock:{task.id}"):
+                        continue
+                    dispatched_at = await self.redis.get(f"aether:dispatched:{task.id}")
+                    timeout = self.settings.lease_s
+                    age = time.time() - float(dispatched_at) if dispatched_at else timeout + 1
+                    if age <= timeout:
+                        continue
+                    await self._requeue_task(workflow, task.id, reason="orphan_lost_envelope")
                     changed = True
-                    continue
-                if await self.redis.exists(f"aether:lock:{task.id}"):
-                    continue
-                dispatched_at = await self.redis.get(f"aether:dispatched:{task.id}")
-                age = time.time() - float(dispatched_at) if dispatched_at else WORKER_TIMEOUT_S + 1
-                if age <= WORKER_TIMEOUT_S:
-                    continue
-                await self._requeue_task(workflow, task.id, reason="orphan_lost_envelope")
-                changed = True
-            if changed:
-                await self._advance(workflow_id)
+                if changed:
+                    await self._advance(workflow_id)
 
     async def consume_results(self) -> None:
-        """Listen for worker result publications on Redis Pub/Sub."""
+        """Listen for worker results and client submissions on Redis Pub/Sub."""
         pubsub = self.redis.pubsub()
-        await pubsub.subscribe("aether:results")
+        await pubsub.subscribe(RESULTS_CHANNEL)
         try:
             while not self._stop.is_set():
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
@@ -268,7 +302,13 @@ class Scheduler:
                     delta = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                await self.apply_task_update(delta)
+                try:
+                    await self.apply_task_update(delta)
+                except Exception:
+                    log.exception(
+                        "scheduler.apply_failed",
+                        extra={"extra_fields": {"workflow_id": delta.get("workflow_id")}},
+                    )
         finally:
-            await pubsub.unsubscribe("aether:results")
+            await pubsub.unsubscribe(RESULTS_CHANNEL)
             await pubsub.aclose()
