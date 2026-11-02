@@ -18,7 +18,7 @@ Submit DAG  →  Control plane schedules ready tasks
 | Budget | Local Docker only. No cloud, no LLM API spend. |
 | Execution | At-least-once (retries after crash are required). |
 | State | Fence-monotonic commits. Stale writers are rejected. |
-| Recovery | Heartbeat every 500ms; worker declared dead after 3s. |
+| Recovery | Heartbeat every 500ms; worker declared dead after ~3s; its work done elsewhere in ~3.5s. |
 | Replay | Cached WAL outputs. Non-deterministic models are not re-invoked. |
 
 ---
@@ -73,7 +73,10 @@ Control plane and workers are separate processes (`python -m src.main control-pl
 Managers usually ask three questions. The answers are in the code, not the pitch.
 
 **What happens if a worker is killed mid-task?**  
-The lease expires (3s). The control plane bumps the fence, sets the task back to `PENDING`, deletes the lock, and enqueues it again. Remaining workers finish the DAG.
+The lease expires (3s). The control plane bumps the fence, sets the task back to `PENDING`, deletes the lock, and puts it at the *front* of the queue, so recovered work does not wait behind the backlog. Remaining workers finish the DAG.
+
+**What if a task keeps killing its workers?**  
+Each reassignment counts as a retry. After 3, the task is marked `FAILED` (with the reason in the WAL) and the workflow stops, instead of a poison task taking down the whole fleet one worker at a time.
 
 **What happens if the dead worker wakes up and writes?**  
 `WriteAheadLog.append_delta` compares the commit’s `fence_token` to `aether:fence:{task_id}`. A higher fence → `StaleFenceError`. The late write never lands.
@@ -141,11 +144,12 @@ You should see the worker marked dead about 3s after its last heartbeat, its in-
 ```
 tests/test_dag_resolution.py    ready-set, joins, cycles, missing edges
 tests/test_chaos_recovery.py    WAL replay, stale fence reject, reassignment,
-                                checkpoint/commit race, orphan vs. backlog
+                                checkpoint/commit race, orphan vs. backlog,
+                                retry priority, retry cap
 scripts/chaos_test.py           real control plane + workers against live Redis
 ```
 
-Unit tests use `fakeredis`. The chaos test starts the actual processes, optionally `SIGKILL`s a worker that is mid-task, and fails unless every task commits exactly once and the dead worker is detected within 5s:
+Unit tests use `fakeredis`. The chaos test starts the actual processes, optionally `SIGKILL`s a worker that is mid-task, and fails unless every task commits exactly once, the dead worker is detected within 4s, and its in-flight work finishes on a survivor within 5s:
 
 ```sh
 redis-server --daemonize yes
@@ -153,10 +157,10 @@ python scripts/chaos_test.py --kill-after 2
 ```
 
 ```
-killed worker-1 while it held step-18
-PASS  61 tasks, 3 workers, completed in 8.03s, one commit per task
-PASS  worker-1 detected dead 3.03s after SIGKILL
-PASS  its in-flight work finished on a survivor 5.91s after SIGKILL
+killed worker-1 while it held step-20
+PASS  61 tasks, 3 workers, completed in 8.01s, one commit per task
+PASS  worker-1 detected dead 2.97s after SIGKILL
+PASS  its in-flight work finished on a survivor 3.41s after SIGKILL
 ```
 
 CI runs the unit tests, then the chaos test three ways (sample DAG, 61-task backlog, and a mid-run kill) on every push.

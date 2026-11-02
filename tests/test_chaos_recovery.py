@@ -4,7 +4,7 @@ import fakeredis
 import pytest
 
 from src.common.models import DAGWorkflow, TaskNode, TaskStatus
-from src.control_plane.scheduler import Scheduler
+from src.control_plane.scheduler import MAX_RETRIES, Scheduler
 from src.control_plane.wal import StaleFenceError, WriteAheadLog
 
 
@@ -161,3 +161,56 @@ async def test_orphan_reclaim_requeues_lost_envelope(redis, wal):
     assert root.retry_count == 1
     envelopes = [json.loads(e) for e in await redis.lrange("aether:queue:tasks", 0, -1)]
     assert [(e["task_id"], e["fence_token"]) for e in envelopes] == [("root", root.fence_token)]
+
+
+async def _claim(redis, wal, workflow_id: str, task_id: str, worker_id: str) -> None:
+    task = (await wal.recover_latest_state(workflow_id)).workflow.task_map()[task_id]
+    await redis.set(f"aether:task_owner:{task_id}", worker_id)
+    await wal.append_delta(
+        workflow_id,
+        {
+            "type": "task_started",
+            "task_id": task_id,
+            "status": TaskStatus.RUNNING.value,
+            "fence_token": task.fence_token,
+            "assigned_worker": worker_id,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_retried_task_jumps_the_queue(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(
+        DAGWorkflow(
+            workflow_id="backlog",
+            tasks=[TaskNode(id=name, agent_prompt=name) for name in ("a", "b", "c")],
+        )
+    )
+    first = json.loads(await redis.rpop("aether:queue:tasks"))
+    await _claim(redis, wal, "backlog", first["task_id"], "worker-1")
+
+    await scheduler.on_worker_failure("worker-1")
+
+    retried = json.loads(await redis.rpop("aether:queue:tasks"))
+    assert retried["task_id"] == first["task_id"]
+    assert retried["fence_token"] > first["fence_token"]
+
+
+@pytest.mark.asyncio
+async def test_task_fails_after_max_retries(redis, wal):
+    scheduler = Scheduler(redis)
+    await scheduler.submit_workflow(_dag())
+
+    for attempt in range(MAX_RETRIES + 1):
+        await _claim(redis, wal, "chaos", "root", f"worker-{attempt}")
+        await scheduler.on_worker_failure(f"worker-{attempt}")
+
+    workflow = (await wal.recover_latest_state("chaos")).workflow
+    root = workflow.task_map()["root"]
+    assert root.status == TaskStatus.FAILED
+    assert root.retry_count == MAX_RETRIES + 1
+    assert workflow.has_failed()
+    assert not await redis.sismember("aether:workflows:active", "chaos")
+    envelopes = [json.loads(e) for e in await redis.lrange("aether:queue:tasks", 0, -1)]
+    assert all(e["fence_token"] < root.fence_token for e in envelopes)
