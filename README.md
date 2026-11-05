@@ -227,7 +227,7 @@ PASS  WAL: 42 writes from epoch 1, then only epoch 2; nothing from the old leade
 
 The same DAG takes about 9.8s with no failure, so the takeover costs roughly one lease. `--pause-leader-after 3` freezes the leader instead, resumes it after the takeover, and also requires it to step down and rejoin as a standby.
 
-CI runs the unit tests, then the chaos test seven ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, a `SIGSTOP`/`SIGCONT` zombie writer, a killed leader, and a frozen-then-resumed leader.
+CI runs the unit tests, then the chaos test seven ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, a `SIGSTOP`/`SIGCONT` zombie writer, a killed leader, and a frozen-then-resumed leader. A separate job runs the Docker quick start itself (`scripts/compose_smoke.py`): it brings up two control planes and three workers with `docker compose`, submits `failover_dag.json`, `docker kill`s a busy worker and then the leader, and requires every task to commit exactly once.
 
 ---
 
@@ -240,7 +240,7 @@ src/worker/              lock + fence executor, heartbeat thread, mock agent
 src/main.py              control-plane | worker | submit-workflow
 config/cluster.yaml      heartbeat, lease, lock, and leader settings
 *_dag.json               sample, fan-out (chaos), and chained (failover) workflows
-scripts/                 chaos test and lease sweep
+scripts/                 chaos test, lease sweep, Docker Compose smoke test
 Dockerfile.control       control-plane image
 Dockerfile.worker        worker image
 ```
