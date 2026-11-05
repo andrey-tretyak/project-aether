@@ -18,6 +18,7 @@ _SOURCES = {
     "max_loop_stall_s": (("heartbeat", "max_loop_stall_s"), "AETHER_MAX_LOOP_STALL_S"),
     "lock_ttl_s": (("locks", "ttl_s"), "AETHER_LOCK_TTL_S"),
     "leader_lease_s": (("control_plane", "leader_lease_s"), "AETHER_LEADER_LEASE_S"),
+    "idempotency_keys": (("effects", "idempotency_keys"), "AETHER_IDEMPOTENCY_KEYS"),
 }
 
 HEARTBEAT_MODES = ("thread", "loop")
@@ -32,6 +33,7 @@ class Settings:
     max_loop_stall_s: float = 30.0
     lock_ttl_s: float = 5.0
     leader_lease_s: float = 2.0
+    idempotency_keys: bool = True
 
     def __post_init__(self) -> None:
         if self.heartbeat_mode not in HEARTBEAT_MODES:
@@ -59,5 +61,21 @@ def load_settings(path: Optional[Path] = None) -> Settings:
             value = os.environ[env_var]
         if value is None:
             continue
-        values[name] = str(value) if types[name] == "str" else float(value)
+        if types[name] == "str":
+            values[name] = str(value)
+        elif types[name] == "bool":
+            values[name] = _parse_bool(value, env_var)
+        else:
+            values[name] = float(value)
     return Settings(**values)
+
+
+def _parse_bool(value: Any, source: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{source}: expected a boolean, got {value!r}")

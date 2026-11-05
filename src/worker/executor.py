@@ -16,6 +16,7 @@ from src.common.models import TaskStatus
 from src.control_plane.heartbeat import HeartbeatMonitor
 from src.control_plane.scheduler import RESULTS_CHANNEL, TASK_OWNER_PREFIX, TASK_QUEUE
 from src.control_plane.wal import StaleFenceError, WriteAheadLog
+from src.worker.effects import MockExternalAPI, perform_effects
 from src.worker.heartbeat_thread import HeartbeatThread
 from src.worker.mock_agent import run_mock_agent
 
@@ -38,6 +39,7 @@ class WorkerExecutor:
         self.wal = WriteAheadLog(redis)
         self.heartbeat = HeartbeatMonitor(redis, self._ignore_failure, self.settings)
         self.heartbeat_client = heartbeat_client
+        self.external_api = MockExternalAPI(redis)
         self._lock_ttl_ms = int(self.settings.lock_ttl_s * 1000)
         self._last_loop_tick = time.monotonic()
         self._stop = asyncio.Event()
@@ -166,7 +168,13 @@ class WorkerExecutor:
 
         refresh = asyncio.create_task(self._refresh_lock(lock_key, token), name=f"lock-{task_id}")
         try:
-            result = await run_mock_agent(envelope.get("agent_prompt", ""), envelope.get("payload") or {})
+            payload = envelope.get("payload") or {}
+            result = await run_mock_agent(envelope.get("agent_prompt", ""), payload)
+            effects = payload.get("effects") or []
+            if effects:
+                result["effects"] = await perform_effects(
+                    self.external_api, workflow_id, task_id, effects, keyed=self.settings.idempotency_keys
+                )
             delta = {
                 "type": "task_completed",
                 "workflow_id": workflow_id,

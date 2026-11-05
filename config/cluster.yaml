@@ -25,3 +25,9 @@ control_plane:
   # leader renews four times per lease, so a standby takes over about this long
   # after the leader stops renewing.
   leader_lease_s: 2
+
+effects:
+  # Send each task effect with an idempotency key derived from (workflow, task,
+  # effect index), so a retried or zombie execution cannot repeat it. Turn off only
+  # to watch duplicates happen.
+  idempotency_keys: true

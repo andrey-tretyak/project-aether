@@ -48,6 +48,8 @@ jobs:
         run: python scripts/chaos_test.py --stop-after 2
       - name: SIGSTOP a busy worker, resume it after reassignment (zombie writer)
         run: python scripts/chaos_test.py --pause-after 2
+      - name: Control - same zombie without idempotency keys must duplicate an effect
+        run: python scripts/chaos_test.py --pause-after 2 --set AETHER_IDEMPOTENCY_KEYS=false --expect-duplicate-effects
       - name: SIGKILL the leading control plane (standby takes over)
         run: python scripts/chaos_test.py --dag failover_dag.json --control-planes 2 --kill-leader-after 3
       - name: SIGSTOP the leader, resume it after takeover (deposed leader)

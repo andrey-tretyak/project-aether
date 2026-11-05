@@ -16,6 +16,8 @@ Exits non-zero unless every task completes exactly once.
                    it must step down, and no write from its epoch may land after
                    the new leader's first.
 Unless --allow-false-deaths is passed, any live worker declared dead fails the run.
+Every external effect a task declares must be performed exactly once (see
+--expect-duplicate-effects for the control run without idempotency keys).
 Detection and recovery budgets are derived from the configured lease.
 """
 
@@ -46,6 +48,7 @@ from src.common.models import TaskStatus  # noqa: E402
 from src.control_plane.heartbeat import HEARTBEAT_HASH  # noqa: E402
 from src.control_plane.leader import LEADER_KEY  # noqa: E402
 from src.control_plane.wal import WriteAheadLog  # noqa: E402
+from src.worker.effects import EXTERNAL_PREFIX, LEDGER_KEY, REPLAYS_KEY  # noqa: E402
 
 logging.getLogger("aether.wal").setLevel(logging.WARNING)
 
@@ -83,8 +86,9 @@ def _log_events(*log_paths: Path) -> list[dict]:
 
 
 async def _clear_aether_keys(redis: Redis) -> None:
-    async for key in redis.scan_iter(match="aether:*"):
-        await redis.delete(key)
+    for pattern in ("aether:*", f"{EXTERNAL_PREFIX}*"):
+        async for key in redis.scan_iter(match=pattern):
+            await redis.delete(key)
 
 
 async def _wait_until(predicate, timeout_s: float, what: str) -> None:
@@ -117,6 +121,37 @@ def _liveness_stats(cp_logs: list[Path], worker_logs: dict[str, Path], expected_
         "false_dead_workers": false_deaths,
         "extra_executions": sum(n - 1 for n in runs_per_task.values()),
     }
+
+
+async def _check_effects(redis: Redis, dag: dict, expect_duplicates: bool) -> None:
+    """Every effect a task declares must reach the external API's ledger exactly once."""
+    expected = {
+        (task["id"], index)
+        for task in dag["tasks"]
+        for index in range(len((task.get("payload") or {}).get("effects") or []))
+    }
+    if not expected:
+        return
+    ledger = [json.loads(entry)["request"] for entry in await redis.lrange(LEDGER_KEY, 0, -1)]
+    performed = Counter(
+        (request["task_id"], request["index"]) for request in ledger if request["workflow_id"] == dag["workflow_id"]
+    )
+    missing = sorted(expected - set(performed))
+    if missing:
+        raise ChaosFailure(f"effects never performed: {missing[:5]}")
+    repeated = sorted(f"{task_id}#{index} x{n}" for (task_id, index), n in performed.items() if n > 1)
+    if expect_duplicates:
+        if not repeated:
+            raise ChaosFailure("expected duplicate effects without idempotency keys, but every effect ran once")
+        print(f"PASS  control: without idempotency keys, effects ran more than once: {', '.join(repeated)}")
+        return
+    if repeated:
+        raise ChaosFailure(f"effects performed more than once: {repeated}")
+    replays = int(await redis.get(REPLAYS_KEY) or 0)
+    print(
+        f"PASS  {len(expected)} external effects, each performed exactly once; "
+        f"{replays} repeated calls answered from the idempotency store"
+    )
 
 
 async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
@@ -435,6 +470,8 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
             if finished_elsewhere:
                 raise ChaosFailure(f"drained worker did not finish its own tasks: {finished_elsewhere}")
             print(f"PASS  {victim} drained: finished {', '.join(victim_tasks)} itself, exited 0, nothing reassigned")
+
+        await _check_effects(redis, dag, args.expect_duplicate_effects)
     except Exception:
         print(f"logs: {logdir}")
         for log_path in cp_logs:
@@ -490,6 +527,11 @@ def main() -> int:
         help="environment override for every process, e.g. AETHER_LEASE_S=1.5",
     )
     parser.add_argument("--allow-false-deaths", action="store_true", help="report false deaths instead of failing")
+    parser.add_argument(
+        "--expect-duplicate-effects",
+        action="store_true",
+        help="control run (with AETHER_IDEMPOTENCY_KEYS=false): fail unless some effect ran more than once",
+    )
     parser.add_argument(
         "--measure-only",
         action="store_true",
