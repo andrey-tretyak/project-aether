@@ -31,18 +31,22 @@ CI injects each of these into real processes on every push, except two: the retr
 ## Architecture
 
 ```mermaid
-flowchart LR
-  Redis[("Redis: WAL, snapshots, fences, queue, leases")]
-  Client["CLI: submit-workflow"] -->|"append submission"| Redis
+flowchart TB
+  Client["CLI<br/>submit-workflow"]
   subgraph CP["Control planes"]
-    Leader["Leader, epoch N"]
+    direction LR
+    Leader["Leader<br/>epoch N"]
     Standby["Standby"]
   end
-  Leader -->|"epoch-fenced writes: dispatch, reassign, snapshot"| Redis
-  Standby -.->|"campaign for the leader lease"| Redis
-  Redis -->|"BRPOP task envelopes"| Workers["Workers"]
-  Workers -->|"fence-checked commits, heartbeats"| Redis
-  Workers -->|"effects with idempotency keys"| API["External API (mock)"]
+  Redis[("Redis<br/>WAL, snapshots, fences,<br/>task queue, leases")]
+  Workers["Workers"]
+  API["External API<br/>(mock)"]
+
+  Client -->|"submit"| Redis
+  Leader -->|"fenced writes"| Redis
+  Standby -.->|"campaign"| Redis
+  Redis <-->|"tasks, commits, heartbeats"| Workers
+  Workers -->|"keyed effects"| API
 ```
 
 - **Log first.** Every dispatch, claim, result, and reassignment is an append-only delta in Redis. State is a snapshot plus the deltas after it; nothing else is authoritative.
