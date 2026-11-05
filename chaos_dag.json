@@ -4,302 +4,842 @@
     {
       "id": "step-00",
       "agent_prompt": "Research shard 0",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-00 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-01",
       "agent_prompt": "Research shard 1",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-01 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-02",
       "agent_prompt": "Research shard 2",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-02 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-03",
       "agent_prompt": "Research shard 3",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-03 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-04",
       "agent_prompt": "Research shard 4",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-04 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-05",
       "agent_prompt": "Research shard 5",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-05 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-06",
       "agent_prompt": "Research shard 6",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-06 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-07",
       "agent_prompt": "Research shard 7",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-07 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-08",
       "agent_prompt": "Research shard 8",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-08 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-09",
       "agent_prompt": "Research shard 9",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-09 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-10",
       "agent_prompt": "Research shard 10",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-10 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-11",
       "agent_prompt": "Research shard 11",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-11 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-12",
       "agent_prompt": "Research shard 12",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-12 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-13",
       "agent_prompt": "Research shard 13",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-13 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-14",
       "agent_prompt": "Research shard 14",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-14 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-15",
       "agent_prompt": "Research shard 15",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-15 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-16",
       "agent_prompt": "Research shard 16",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-16 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-17",
       "agent_prompt": "Research shard 17",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-17 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-18",
       "agent_prompt": "Research shard 18",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-18 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-19",
       "agent_prompt": "Research shard 19",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-19 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-20",
       "agent_prompt": "Research shard 20",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-20 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-21",
       "agent_prompt": "Research shard 21",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-21 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-22",
       "agent_prompt": "Research shard 22",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-22 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-23",
       "agent_prompt": "Research shard 23",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-23 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-24",
       "agent_prompt": "Research shard 24",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-24 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-25",
       "agent_prompt": "Research shard 25",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-25 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-26",
       "agent_prompt": "Research shard 26",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-26 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-27",
       "agent_prompt": "Research shard 27",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-27 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-28",
       "agent_prompt": "Research shard 28",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-28 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-29",
       "agent_prompt": "Research shard 29",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-29 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-30",
       "agent_prompt": "Research shard 30",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-30 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-31",
       "agent_prompt": "Research shard 31",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-31 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-32",
       "agent_prompt": "Research shard 32",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-32 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-33",
       "agent_prompt": "Research shard 33",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-33 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-34",
       "agent_prompt": "Research shard 34",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-34 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-35",
       "agent_prompt": "Research shard 35",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-35 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-36",
       "agent_prompt": "Research shard 36",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-36 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-37",
       "agent_prompt": "Research shard 37",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-37 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-38",
       "agent_prompt": "Research shard 38",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-38 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-39",
       "agent_prompt": "Research shard 39",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-39 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-40",
       "agent_prompt": "Research shard 40",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-40 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-41",
       "agent_prompt": "Research shard 41",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-41 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-42",
       "agent_prompt": "Research shard 42",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-42 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-43",
       "agent_prompt": "Research shard 43",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-43 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-44",
       "agent_prompt": "Research shard 44",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-44 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-45",
       "agent_prompt": "Research shard 45",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-45 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-46",
       "agent_prompt": "Research shard 46",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-46 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-47",
       "agent_prompt": "Research shard 47",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-47 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-48",
       "agent_prompt": "Research shard 48",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-48 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-49",
       "agent_prompt": "Research shard 49",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-49 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-50",
       "agent_prompt": "Research shard 50",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-50 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-51",
       "agent_prompt": "Research shard 51",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-51 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-52",
       "agent_prompt": "Research shard 52",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-52 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-53",
       "agent_prompt": "Research shard 53",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-53 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-54",
       "agent_prompt": "Research shard 54",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-54 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-55",
       "agent_prompt": "Research shard 55",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-55 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-56",
       "agent_prompt": "Research shard 56",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-56 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-57",
       "agent_prompt": "Research shard 57",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-57 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-58",
       "agent_prompt": "Research shard 58",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-58 finished."
+          }
+        ]
+      }
     },
     {
       "id": "step-59",
       "agent_prompt": "Research shard 59",
-      "dependencies": []
+      "dependencies": [],
+      "payload": {
+        "effects": [
+          {
+            "kind": "notify",
+            "channel": "#research",
+            "text": "step-59 finished."
+          }
+        ]
+      }
     },
     {
       "id": "merge",
@@ -365,7 +905,16 @@
         "step-57",
         "step-58",
         "step-59"
-      ]
+      ],
+      "payload": {
+        "effects": [
+          {
+            "kind": "publish_report",
+            "channel": "#research",
+            "text": "All 60 shards merged."
+          }
+        ]
+      }
     }
   ]
 }

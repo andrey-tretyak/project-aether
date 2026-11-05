@@ -16,7 +16,7 @@ Submit DAG  →  Control plane schedules ready tasks
 | Constraint | Choice |
 | --- | --- |
 | Budget | Local Docker only. No cloud, no LLM API spend. |
-| Execution | At-least-once (retries after crash are required). |
+| Execution | At-least-once (retries after crash are required); external effects exactly once, through idempotency keys. |
 | State | Fence-monotonic commits. Stale writers are rejected. |
 | Recovery | Heartbeat every 500ms from a dedicated thread; 1.5s lease; a killed worker's task is finished elsewhere in ~2s. |
 | Control plane | One leader, hot standbys. A standby takes over ~2s after the leader dies; a deposed leader cannot write. |
@@ -86,7 +86,20 @@ Each reassignment counts as a retry. After 3, the task is marked `FAILED` (with 
 **Do we re-call the model on recovery?**  
 No. `recover_latest_state` loads the latest snapshot and replays deltas. LLM/tool output is data in the log. Replay is deterministic even when the original step was not.
 
-Honest scope: **execution is at-least-once**, **committed workflow state is fence-monotonic**. That is the useful guarantee for non-idempotent agent steps. Exactly-once *effects* on the outside world would need an idempotency key at the tool boundary; that is called out as future work, not pretended here.
+**Can a retry repeat a side effect?**  
+Not when the receiving API takes an idempotency key. Execution is at-least-once, so a task that sends a message or charges a card can run twice: once on the worker that was declared dead, once on the worker that took over. Tasks declare effects in their payload (`{"effects": [{"kind": "notify", ...}]}`), and the worker sends each one after the agent step and before committing, with a key derived from `(workflow, task, effect index)`. The key never includes the fence or the attempt, so every execution of the same effect presents the same key. The receiving API (`MockExternalAPI`, which follows Stripe's rules) performs the first request it sees for a key, answers repeats with the stored receipt, and rejects the key if it comes back with a different request. Both executions get the same receipt, and only one is committed.
+
+Checking the fence before calling the API would narrow the window, but not close it: the worker can be paused between the check and the call. The key closes it. The chaos test checks the API's ledger after every run, and a control run in CI turns the keys off and requires a duplicate to appear:
+
+```
+PASS  worker-1 woke up and tried to write step-18 with fence 1; rejected. Committed once, with fence 3, by worker-3
+PASS  61 external effects, each performed exactly once; 1 repeated calls answered from the idempotency store
+
+# same scenario, AETHER_IDEMPOTENCY_KEYS=false
+PASS  control: without idempotency keys, effects ran more than once: step-18#0 x2
+```
+
+Honest scope: **execution is at-least-once**, **committed workflow state is fence-monotonic**, and **effects are exactly-once only where the far side honors idempotency keys**. An API that does not would need an outbox or after-the-fact reconciliation; that is not built here.
 
 Orphans are reclaimed too: a task that is `RUNNING` in the log but is neither waiting in the queue nor held by a live worker (for example, a worker died between `BRPOP` and taking the lock) is requeued after the same lease bound. Tasks that are simply waiting behind a backlog are left alone.
 
@@ -130,6 +143,7 @@ Lease, heartbeat interval, lock TTL, and leader lease live in `config/cluster.ya
 | --- | --- | --- |
 | Split-brain control plane | Leader lease in Redis with epoch-checked writes; hot standbys take over in ~2s. | Raft / quorum. Leadership is only as available as the one Redis it lives in. |
 | Zombie workers | Monotonic fence tokens on the WAL. | Full Redlock across N Redis masters — one Redis, short NX locks. |
+| Repeated side effects | Idempotency key per (workflow, task, effect), stable across attempts. | Outbox or reconciliation for APIs that take no key. |
 | Non-deterministic replay | Cache results in the log. | Prompting a real model during recover. |
 | Queue vs bus | Redis list + pub/sub. Enough to demonstrate routing and wake-up. | NATS / RabbitMQ. Easy to swap the envelope, not the state machine. |
 | Cost of testing failure | Mock backend + `docker kill`. | Staging spend or GPU nodes. |
@@ -183,6 +197,8 @@ tests/test_chaos_recovery.py    WAL replay, stale fence reject, reassignment,
 tests/test_liveness.py          config + env overrides, heartbeat thread vs. wedged loop
 tests/test_failover.py          one leader at a time, epochs, deposed-leader writes rejected,
                                 atomic dispatch
+tests/test_effects.py           idempotency keys: replay, conflict, concurrency, retry under a
+                                new fence, keys off
 scripts/chaos_test.py           real control planes + workers against live Redis
 scripts/lease_sweep.py          lease length x heartbeat mode under loop stalls
 ```
@@ -227,7 +243,7 @@ PASS  WAL: 42 writes from epoch 1, then only epoch 2; nothing from the old leade
 
 The same DAG takes about 9.8s with no failure, so the takeover costs roughly one lease. `--pause-leader-after 3` freezes the leader instead, resumes it after the takeover, and also requires it to step down and rejoin as a standby.
 
-CI runs the unit tests, then the chaos test seven ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, a `SIGSTOP`/`SIGCONT` zombie writer, a killed leader, and a frozen-then-resumed leader. A separate job runs the Docker quick start itself (`scripts/compose_smoke.py`): it brings up two control planes and three workers with `docker compose`, submits `failover_dag.json`, `docker kill`s a busy worker and then the leader, and requires every task to commit exactly once.
+CI runs the unit tests, then the chaos test eight ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, a `SIGSTOP`/`SIGCONT` zombie writer, the same zombie with idempotency keys off (which must duplicate an effect), a killed leader, and a frozen-then-resumed leader. A separate job runs the Docker quick start itself (`scripts/compose_smoke.py`): it brings up two control planes and three workers with `docker compose`, submits `failover_dag.json`, `docker kill`s a busy worker and then the leader, and requires every task to commit exactly once.
 
 ---
 
@@ -236,7 +252,7 @@ CI runs the unit tests, then the chaos test seven ways on every push: sample DAG
 ```
 src/common/              Task/DAG models, structured logs, Redis client
 src/control_plane/       scheduler, WAL, heartbeat, leader election
-src/worker/              lock + fence executor, heartbeat thread, mock agent
+src/worker/              lock + fence executor, heartbeat thread, mock agent, keyed effects
 src/main.py              control-plane | worker | submit-workflow
 config/cluster.yaml      heartbeat, lease, lock, and leader settings
 *_dag.json               sample, fan-out (chaos), and chained (failover) workflows
@@ -251,7 +267,7 @@ Dockerfile.worker        worker image
 
 - Replicated coordination state. The control plane fails over, but Redis is one instance; surviving its loss needs Raft or a replicated store, not a lease
 - Real LLM providers in the default path
-- Exactly-once side effects at external APIs
+- Exactly-once effects at APIs that take no idempotency key (outbox, reconciliation)
 - Multi-tenant auth, TLS, or a public HTTP surface
 
 Those are product layers. This repo is the recovery kernel: **log, fence, lease, requeue.**
