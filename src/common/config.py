@@ -17,6 +17,7 @@ _SOURCES = {
     "heartbeat_mode": (("heartbeat", "mode"), "AETHER_HEARTBEAT_MODE"),
     "max_loop_stall_s": (("heartbeat", "max_loop_stall_s"), "AETHER_MAX_LOOP_STALL_S"),
     "lock_ttl_s": (("locks", "ttl_s"), "AETHER_LOCK_TTL_S"),
+    "leader_lease_s": (("control_plane", "leader_lease_s"), "AETHER_LEADER_LEASE_S"),
 }
 
 HEARTBEAT_MODES = ("thread", "loop")
@@ -30,12 +31,15 @@ class Settings:
     heartbeat_mode: str = "thread"
     max_loop_stall_s: float = 30.0
     lock_ttl_s: float = 5.0
+    leader_lease_s: float = 2.0
 
     def __post_init__(self) -> None:
         if self.heartbeat_mode not in HEARTBEAT_MODES:
             raise ValueError(f"heartbeat mode must be one of {HEARTBEAT_MODES}, got {self.heartbeat_mode!r}")
         if self.lease_s <= self.heartbeat_interval_s:
             raise ValueError("lease_s must be longer than heartbeat_interval_s")
+        if self.leader_lease_s <= 0:
+            raise ValueError("leader_lease_s must be positive")
 
 
 def load_settings(path: Optional[Path] = None) -> Settings:

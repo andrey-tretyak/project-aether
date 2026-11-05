@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
-COPY sample_dag.json chaos_dag.json ./
+COPY sample_dag.json chaos_dag.json failover_dag.json ./
 COPY config ./config
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

@@ -1,0 +1,671 @@
+{
+  "workflow_id": "failover-chains",
+  "tasks": [
+    {
+      "id": "chain-01-step-1",
+      "agent_prompt": "Chain 1, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-01-step-2",
+      "agent_prompt": "Chain 1, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-1"
+      ]
+    },
+    {
+      "id": "chain-01-step-3",
+      "agent_prompt": "Chain 1, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-2"
+      ]
+    },
+    {
+      "id": "chain-01-step-4",
+      "agent_prompt": "Chain 1, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-3"
+      ]
+    },
+    {
+      "id": "chain-01-step-5",
+      "agent_prompt": "Chain 1, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-4"
+      ]
+    },
+    {
+      "id": "chain-01-step-6",
+      "agent_prompt": "Chain 1, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-5"
+      ]
+    },
+    {
+      "id": "chain-01-step-7",
+      "agent_prompt": "Chain 1, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-6"
+      ]
+    },
+    {
+      "id": "chain-01-step-8",
+      "agent_prompt": "Chain 1, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-01-step-7"
+      ]
+    },
+    {
+      "id": "chain-02-step-1",
+      "agent_prompt": "Chain 2, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-02-step-2",
+      "agent_prompt": "Chain 2, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-1"
+      ]
+    },
+    {
+      "id": "chain-02-step-3",
+      "agent_prompt": "Chain 2, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-2"
+      ]
+    },
+    {
+      "id": "chain-02-step-4",
+      "agent_prompt": "Chain 2, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-3"
+      ]
+    },
+    {
+      "id": "chain-02-step-5",
+      "agent_prompt": "Chain 2, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-4"
+      ]
+    },
+    {
+      "id": "chain-02-step-6",
+      "agent_prompt": "Chain 2, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-5"
+      ]
+    },
+    {
+      "id": "chain-02-step-7",
+      "agent_prompt": "Chain 2, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-6"
+      ]
+    },
+    {
+      "id": "chain-02-step-8",
+      "agent_prompt": "Chain 2, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-02-step-7"
+      ]
+    },
+    {
+      "id": "chain-03-step-1",
+      "agent_prompt": "Chain 3, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-03-step-2",
+      "agent_prompt": "Chain 3, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-1"
+      ]
+    },
+    {
+      "id": "chain-03-step-3",
+      "agent_prompt": "Chain 3, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-2"
+      ]
+    },
+    {
+      "id": "chain-03-step-4",
+      "agent_prompt": "Chain 3, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-3"
+      ]
+    },
+    {
+      "id": "chain-03-step-5",
+      "agent_prompt": "Chain 3, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-4"
+      ]
+    },
+    {
+      "id": "chain-03-step-6",
+      "agent_prompt": "Chain 3, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-5"
+      ]
+    },
+    {
+      "id": "chain-03-step-7",
+      "agent_prompt": "Chain 3, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-6"
+      ]
+    },
+    {
+      "id": "chain-03-step-8",
+      "agent_prompt": "Chain 3, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-03-step-7"
+      ]
+    },
+    {
+      "id": "chain-04-step-1",
+      "agent_prompt": "Chain 4, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-04-step-2",
+      "agent_prompt": "Chain 4, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-1"
+      ]
+    },
+    {
+      "id": "chain-04-step-3",
+      "agent_prompt": "Chain 4, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-2"
+      ]
+    },
+    {
+      "id": "chain-04-step-4",
+      "agent_prompt": "Chain 4, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-3"
+      ]
+    },
+    {
+      "id": "chain-04-step-5",
+      "agent_prompt": "Chain 4, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-4"
+      ]
+    },
+    {
+      "id": "chain-04-step-6",
+      "agent_prompt": "Chain 4, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-5"
+      ]
+    },
+    {
+      "id": "chain-04-step-7",
+      "agent_prompt": "Chain 4, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-6"
+      ]
+    },
+    {
+      "id": "chain-04-step-8",
+      "agent_prompt": "Chain 4, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-04-step-7"
+      ]
+    },
+    {
+      "id": "chain-05-step-1",
+      "agent_prompt": "Chain 5, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-05-step-2",
+      "agent_prompt": "Chain 5, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-1"
+      ]
+    },
+    {
+      "id": "chain-05-step-3",
+      "agent_prompt": "Chain 5, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-2"
+      ]
+    },
+    {
+      "id": "chain-05-step-4",
+      "agent_prompt": "Chain 5, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-3"
+      ]
+    },
+    {
+      "id": "chain-05-step-5",
+      "agent_prompt": "Chain 5, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-4"
+      ]
+    },
+    {
+      "id": "chain-05-step-6",
+      "agent_prompt": "Chain 5, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-5"
+      ]
+    },
+    {
+      "id": "chain-05-step-7",
+      "agent_prompt": "Chain 5, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-6"
+      ]
+    },
+    {
+      "id": "chain-05-step-8",
+      "agent_prompt": "Chain 5, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-05-step-7"
+      ]
+    },
+    {
+      "id": "chain-06-step-1",
+      "agent_prompt": "Chain 6, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-06-step-2",
+      "agent_prompt": "Chain 6, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-1"
+      ]
+    },
+    {
+      "id": "chain-06-step-3",
+      "agent_prompt": "Chain 6, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-2"
+      ]
+    },
+    {
+      "id": "chain-06-step-4",
+      "agent_prompt": "Chain 6, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-3"
+      ]
+    },
+    {
+      "id": "chain-06-step-5",
+      "agent_prompt": "Chain 6, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-4"
+      ]
+    },
+    {
+      "id": "chain-06-step-6",
+      "agent_prompt": "Chain 6, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-5"
+      ]
+    },
+    {
+      "id": "chain-06-step-7",
+      "agent_prompt": "Chain 6, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-6"
+      ]
+    },
+    {
+      "id": "chain-06-step-8",
+      "agent_prompt": "Chain 6, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-06-step-7"
+      ]
+    },
+    {
+      "id": "chain-07-step-1",
+      "agent_prompt": "Chain 7, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-07-step-2",
+      "agent_prompt": "Chain 7, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-1"
+      ]
+    },
+    {
+      "id": "chain-07-step-3",
+      "agent_prompt": "Chain 7, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-2"
+      ]
+    },
+    {
+      "id": "chain-07-step-4",
+      "agent_prompt": "Chain 7, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-3"
+      ]
+    },
+    {
+      "id": "chain-07-step-5",
+      "agent_prompt": "Chain 7, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-4"
+      ]
+    },
+    {
+      "id": "chain-07-step-6",
+      "agent_prompt": "Chain 7, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-5"
+      ]
+    },
+    {
+      "id": "chain-07-step-7",
+      "agent_prompt": "Chain 7, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-6"
+      ]
+    },
+    {
+      "id": "chain-07-step-8",
+      "agent_prompt": "Chain 7, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-07-step-7"
+      ]
+    },
+    {
+      "id": "chain-08-step-1",
+      "agent_prompt": "Chain 8, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-08-step-2",
+      "agent_prompt": "Chain 8, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-1"
+      ]
+    },
+    {
+      "id": "chain-08-step-3",
+      "agent_prompt": "Chain 8, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-2"
+      ]
+    },
+    {
+      "id": "chain-08-step-4",
+      "agent_prompt": "Chain 8, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-3"
+      ]
+    },
+    {
+      "id": "chain-08-step-5",
+      "agent_prompt": "Chain 8, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-4"
+      ]
+    },
+    {
+      "id": "chain-08-step-6",
+      "agent_prompt": "Chain 8, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-5"
+      ]
+    },
+    {
+      "id": "chain-08-step-7",
+      "agent_prompt": "Chain 8, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-6"
+      ]
+    },
+    {
+      "id": "chain-08-step-8",
+      "agent_prompt": "Chain 8, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-08-step-7"
+      ]
+    },
+    {
+      "id": "chain-09-step-1",
+      "agent_prompt": "Chain 9, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-09-step-2",
+      "agent_prompt": "Chain 9, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-1"
+      ]
+    },
+    {
+      "id": "chain-09-step-3",
+      "agent_prompt": "Chain 9, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-2"
+      ]
+    },
+    {
+      "id": "chain-09-step-4",
+      "agent_prompt": "Chain 9, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-3"
+      ]
+    },
+    {
+      "id": "chain-09-step-5",
+      "agent_prompt": "Chain 9, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-4"
+      ]
+    },
+    {
+      "id": "chain-09-step-6",
+      "agent_prompt": "Chain 9, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-5"
+      ]
+    },
+    {
+      "id": "chain-09-step-7",
+      "agent_prompt": "Chain 9, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-6"
+      ]
+    },
+    {
+      "id": "chain-09-step-8",
+      "agent_prompt": "Chain 9, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-09-step-7"
+      ]
+    },
+    {
+      "id": "chain-10-step-1",
+      "agent_prompt": "Chain 10, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-10-step-2",
+      "agent_prompt": "Chain 10, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-1"
+      ]
+    },
+    {
+      "id": "chain-10-step-3",
+      "agent_prompt": "Chain 10, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-2"
+      ]
+    },
+    {
+      "id": "chain-10-step-4",
+      "agent_prompt": "Chain 10, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-3"
+      ]
+    },
+    {
+      "id": "chain-10-step-5",
+      "agent_prompt": "Chain 10, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-4"
+      ]
+    },
+    {
+      "id": "chain-10-step-6",
+      "agent_prompt": "Chain 10, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-5"
+      ]
+    },
+    {
+      "id": "chain-10-step-7",
+      "agent_prompt": "Chain 10, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-6"
+      ]
+    },
+    {
+      "id": "chain-10-step-8",
+      "agent_prompt": "Chain 10, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-10-step-7"
+      ]
+    },
+    {
+      "id": "chain-11-step-1",
+      "agent_prompt": "Chain 11, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-11-step-2",
+      "agent_prompt": "Chain 11, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-1"
+      ]
+    },
+    {
+      "id": "chain-11-step-3",
+      "agent_prompt": "Chain 11, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-2"
+      ]
+    },
+    {
+      "id": "chain-11-step-4",
+      "agent_prompt": "Chain 11, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-3"
+      ]
+    },
+    {
+      "id": "chain-11-step-5",
+      "agent_prompt": "Chain 11, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-4"
+      ]
+    },
+    {
+      "id": "chain-11-step-6",
+      "agent_prompt": "Chain 11, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-5"
+      ]
+    },
+    {
+      "id": "chain-11-step-7",
+      "agent_prompt": "Chain 11, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-6"
+      ]
+    },
+    {
+      "id": "chain-11-step-8",
+      "agent_prompt": "Chain 11, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-11-step-7"
+      ]
+    },
+    {
+      "id": "chain-12-step-1",
+      "agent_prompt": "Chain 12, step 1: refine the previous step's output.",
+      "dependencies": []
+    },
+    {
+      "id": "chain-12-step-2",
+      "agent_prompt": "Chain 12, step 2: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-1"
+      ]
+    },
+    {
+      "id": "chain-12-step-3",
+      "agent_prompt": "Chain 12, step 3: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-2"
+      ]
+    },
+    {
+      "id": "chain-12-step-4",
+      "agent_prompt": "Chain 12, step 4: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-3"
+      ]
+    },
+    {
+      "id": "chain-12-step-5",
+      "agent_prompt": "Chain 12, step 5: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-4"
+      ]
+    },
+    {
+      "id": "chain-12-step-6",
+      "agent_prompt": "Chain 12, step 6: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-5"
+      ]
+    },
+    {
+      "id": "chain-12-step-7",
+      "agent_prompt": "Chain 12, step 7: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-6"
+      ]
+    },
+    {
+      "id": "chain-12-step-8",
+      "agent_prompt": "Chain 12, step 8: refine the previous step's output.",
+      "dependencies": [
+        "chain-12-step-7"
+      ]
+    },
+    {
+      "id": "merge",
+      "agent_prompt": "Merge the final output of every chain.",
+      "dependencies": [
+        "chain-01-step-8",
+        "chain-02-step-8",
+        "chain-03-step-8",
+        "chain-04-step-8",
+        "chain-05-step-8",
+        "chain-06-step-8",
+        "chain-07-step-8",
+        "chain-08-step-8",
+        "chain-09-step-8",
+        "chain-10-step-8",
+        "chain-11-step-8",
+        "chain-12-step-8"
+      ]
+    }
+  ]
+}

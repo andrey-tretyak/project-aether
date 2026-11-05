@@ -19,3 +19,9 @@ heartbeat:
 
 locks:
   ttl_s: 5
+
+control_plane:
+  # Run several control planes; one holds this lease and the rest stand by. The
+  # leader renews four times per lease, so a standby takes over about this long
+  # after the leader stops renewing.
+  leader_lease_s: 2

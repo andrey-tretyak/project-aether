@@ -11,6 +11,7 @@ from src.common.logger import get_logger
 from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
 from src.common.config import Settings, load_settings
 from src.control_plane.heartbeat import HeartbeatMonitor
+from src.control_plane.leader import LeaderElection, NotLeaderError
 from src.control_plane.wal import WriteAheadLog
 
 log = get_logger("aether.scheduler")
@@ -30,15 +31,25 @@ class Scheduler:
     (worker result, dead worker, orphan reclaim, reconcile) runs under one lock, so
     each transition starts from the latest WAL state and two of them never race to
     bump the same task's fence.
+
+    With `leader` set, every write is fenced by the leader lease; the first rejected
+    write marks leadership lost and stops this scheduler.
     """
 
-    def __init__(self, redis: Redis, settings: Settings | None = None):
+    def __init__(self, redis: Redis, settings: Settings | None = None, leader: LeaderElection | None = None):
         self.redis = redis
         self.settings = settings or load_settings()
-        self.wal = WriteAheadLog(redis)
+        self.leader = leader
+        self.wal = WriteAheadLog(redis, leader)
         self.heartbeat = HeartbeatMonitor(redis, self.on_worker_failure, self.settings)
         self._transitions = asyncio.Lock()
         self._stop = asyncio.Event()
+
+    def _deposed(self, exc: NotLeaderError) -> None:
+        log.info("control_plane.write_rejected", extra={"extra_fields": {"reason": str(exc)}})
+        if self.leader is not None:
+            self.leader.mark_lost("write rejected")
+        self._stop.set()
 
     async def start(self) -> None:
         self._stop.clear()
@@ -68,6 +79,9 @@ class Scheduler:
                 for workflow_id in await self._active_workflow_ids():
                     async with self._transitions:
                         await self._advance(workflow_id)
+            except NotLeaderError as exc:
+                self._deposed(exc)
+                return
             except Exception:
                 log.exception("scheduler.reconcile_failed")
             try:
@@ -144,6 +158,12 @@ class Scheduler:
 
     async def on_worker_failure(self, worker_id: str) -> None:
         """Reassign RUNNING tasks owned by a dead worker with a new fence token."""
+        try:
+            await self._reassign_from(worker_id)
+        except NotLeaderError as exc:
+            self._deposed(exc)
+
+    async def _reassign_from(self, worker_id: str) -> None:
         async with self._transitions:
             for workflow_id in await self._active_workflow_ids():
                 recovered = await self.wal.recover_latest_state(workflow_id)
@@ -172,20 +192,25 @@ class Scheduler:
                 "status": TaskStatus.RUNNING.value,
                 "fence_token": fence,
             }
-            await self.wal.append_delta(workflow.workflow_id, delta)
-            envelope = {
-                "workflow_id": workflow.workflow_id,
-                "task_id": task.id,
-                "agent_prompt": task.agent_prompt,
-                "payload": task.payload,
-                "fence_token": fence,
-            }
-            await self.redis.set(f"aether:dispatched:{task.id}", str(time.time()))
-            # Workers BRPOP from the right, so RPUSH puts a retry at the head of the line.
-            if task.retry_count > 0:
-                await self.redis.rpush(TASK_QUEUE, json.dumps(envelope))
-            else:
-                await self.redis.lpush(TASK_QUEUE, json.dumps(envelope))
+            envelope = json.dumps(
+                {
+                    "workflow_id": workflow.workflow_id,
+                    "task_id": task.id,
+                    "agent_prompt": task.agent_prompt,
+                    "payload": task.payload,
+                    "fence_token": fence,
+                }
+            )
+
+            def enqueue(pipe: Any) -> None:
+                pipe.set(f"aether:dispatched:{task.id}", str(time.time()))
+                # Workers BRPOP from the right, so RPUSH puts a retry at the head of the line.
+                if task.retry_count > 0:
+                    pipe.rpush(TASK_QUEUE, envelope)
+                else:
+                    pipe.lpush(TASK_QUEUE, envelope)
+
+            await self.wal.append_delta(workflow.workflow_id, delta, also=enqueue)
             log.info(
                 "task.dispatched",
                 extra={
@@ -304,6 +329,9 @@ class Scheduler:
                     continue
                 try:
                     await self.apply_task_update(delta)
+                except NotLeaderError as exc:
+                    self._deposed(exc)
+                    return
                 except Exception:
                     log.exception(
                         "scheduler.apply_failed",

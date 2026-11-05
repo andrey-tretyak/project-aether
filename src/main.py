@@ -3,27 +3,58 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
+import socket
 import sys
 from pathlib import Path
 
+from src.common.config import load_settings
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow
 from src.common.redis_client import create_redis, create_sync_redis
+from src.control_plane.leader import LeaderElection
 from src.control_plane.scheduler import Scheduler
 from src.worker.executor import WorkerExecutor
 
 log = get_logger("aether.main")
 
 
-async def run_control_plane() -> None:
-    redis = create_redis()
-    scheduler = Scheduler(redis)
-    await scheduler.start()
+async def _first(*aws: asyncio.Future | asyncio.Task) -> None:
+    """Wait for the first of `aws` to finish and cancel the rest."""
+    tasks = [asyncio.ensure_future(a) for a in aws]
     try:
-        await scheduler.consume_results()
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        await scheduler.stop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def run_control_plane() -> None:
+    """Stand by until elected, lead until the lease is lost, then stand by again."""
+    redis = create_redis()
+    settings = load_settings()
+    node_id = os.environ.get("CONTROL_PLANE_ID") or f"{socket.gethostname()}-{os.getpid()}"
+    election = LeaderElection(redis, node_id, settings)
+    stopping = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stopping.set)
+    try:
+        while not stopping.is_set():
+            await _first(election.campaign(), stopping.wait())
+            if stopping.is_set():
+                break
+            scheduler = Scheduler(redis, settings, leader=election)
+            await scheduler.start()
+            try:
+                await _first(scheduler.consume_results(), election.hold(), stopping.wait())
+            finally:
+                await scheduler.stop()
+    finally:
+        if election.token is not None:
+            await election.resign()
         await redis.aclose()
 
 

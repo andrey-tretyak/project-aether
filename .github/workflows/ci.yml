@@ -48,3 +48,7 @@ jobs:
         run: python scripts/chaos_test.py --stop-after 2
       - name: SIGSTOP a busy worker, resume it after reassignment (zombie writer)
         run: python scripts/chaos_test.py --pause-after 2
+      - name: SIGKILL the leading control plane (standby takes over)
+        run: python scripts/chaos_test.py --dag failover_dag.json --control-planes 2 --kill-leader-after 3
+      - name: SIGSTOP the leader, resume it after takeover (deposed leader)
+        run: python scripts/chaos_test.py --dag failover_dag.json --control-planes 2 --pause-leader-after 3

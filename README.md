@@ -19,6 +19,7 @@ Submit DAG  →  Control plane schedules ready tasks
 | Execution | At-least-once (retries after crash are required). |
 | State | Fence-monotonic commits. Stale writers are rejected. |
 | Recovery | Heartbeat every 500ms from a dedicated thread; 1.5s lease; a killed worker's task is finished elsewhere in ~2s. |
+| Control plane | One leader, hot standbys. A standby takes over ~2s after the leader dies; a deposed leader cannot write. |
 | Replay | Cached WAL outputs. Non-deterministic models are not re-invoked. |
 
 ---
@@ -61,10 +62,11 @@ flowchart TB
 | **Scheduler** | The only dispatcher. Resolves the DAG, dispatches tasks whose dependencies are `COMPLETED`, requeues work owned by a dead worker. |
 | **WAL** | Append-only deltas, snapshot, replay from `wal_index`. Source of truth after crash. |
 | **Heartbeat monitor** | Redis hash + TTL leases. Missed liveness → `on_worker_failure`. |
+| **Leader election** | One Redis lease key holding `node:epoch`. Standbys campaign; every control-plane write checks the token in the same transaction. |
 | **Worker executor** | `BRPOP` the queue, `SET NX` a lock, refresh TTL while running, commit through the WAL, publish a wake-up. Heartbeats from its own thread; drains on `SIGTERM`. |
 | **Mock agent** | Hash-seeded delay and JSON. Swap point for Ollama / vLLM later. |
 
-Control plane and workers are separate processes (`python -m src.main control-plane` / `worker`). One Redis instance is the coordination fabric so the Compose file stays three services, not a message-bus zoo.
+Control plane and workers are separate processes (`python -m src.main control-plane` / `worker`). Run as many control planes as you like; one leads and the rest stand by. One Redis instance is the coordination fabric so the Compose file stays three services, not a message-bus zoo.
 
 ---
 
@@ -111,7 +113,14 @@ Five runs per cell. The five repeated executions in the thread rows are the kill
 **What about a planned shutdown?**  
 `SIGTERM` drains: the worker stops taking work, finishes and commits what it holds, and deregisters, so nothing is reassigned. CI checks this.
 
-Lease, heartbeat interval, and lock TTL live in `config/cluster.yaml`, and each can be overridden with an `AETHER_*` environment variable.
+**What if the control plane dies?**  
+A standby takes over. Control planes compete for one Redis key, `aether:leader`, set with `NX` and a 2s TTL; the winner renews it four times per lease, and the others poll. All scheduler state is in the WAL, so a new leader needs no handoff: its reconcile loop replays each active workflow and dispatches whatever is ready. Workers never talk to the control plane directly, so they keep running through the gap.
+
+The hard part is the old leader. One that was paused rather than killed (a GC stall, a frozen VM, a partition) wakes up still believing it leads. Every election increments an epoch, and the key holds `node:epoch`. Each control-plane write (fence bump, WAL append, snapshot) runs in a `WATCH`/`MULTI` transaction that first checks the key still holds this node's token, so a deposed leader's write fails with `NotLeaderError` and the node steps down to standby. This is the fence-token idea applied to the leader. A dispatch's log entry and its queue push share one transaction, so a deposed leader cannot enqueue a duplicate either. Every control-plane delta records its epoch, and the chaos test checks that none from the old epoch lands after the new leader's first.
+
+On `SIGTERM`, the leader deletes its own key so a standby takes over immediately instead of waiting out the lease.
+
+Lease, heartbeat interval, lock TTL, and leader lease live in `config/cluster.yaml`, and each can be overridden with an `AETHER_*` environment variable.
 
 ---
 
@@ -119,7 +128,7 @@ Lease, heartbeat interval, and lock TTL live in `config/cluster.yaml`, and each 
 
 | Problem | What Aether does | What it does not do (yet) |
 | --- | --- | --- |
-| Split-brain control plane | Single leader. Simple, correct for a laptop cluster. | Raft / quorum. The TDD names it; v1 does not fake consensus. |
+| Split-brain control plane | Leader lease in Redis with epoch-checked writes; hot standbys take over in ~2s. | Raft / quorum. Leadership is only as available as the one Redis it lives in. |
 | Zombie workers | Monotonic fence tokens on the WAL. | Full Redlock across N Redis masters — one Redis, short NX locks. |
 | Non-deterministic replay | Cache results in the log. | Prompting a real model during recover. |
 | Queue vs bus | Redis list + pub/sub. Enough to demonstrate routing and wake-up. | NATS / RabbitMQ. Easy to swap the envelope, not the state machine. |
@@ -160,6 +169,8 @@ docker compose logs control-plane | grep -E "worker.dead|task.reassigned|workflo
 
 You should see the worker marked dead within about 2s, its in-flight task reassigned with a higher fence, and `workflow.terminal` with `"complete": true` once the survivors finish.
 
+To kill the control plane instead, run two (`--scale control-plane=2`), submit `failover_dag.json` (12 chains of 8 dependent steps, so the leader keeps dispatching for ~10s), and `docker kill` whichever one logged `control_plane.elected`. The other logs `control_plane.elected` with the next epoch about 2s later and finishes the workflow.
+
 ---
 
 ## Tests
@@ -170,7 +181,9 @@ tests/test_chaos_recovery.py    WAL replay, stale fence reject, reassignment,
                                 checkpoint/commit race, orphan vs. backlog,
                                 concurrent recovery paths, retry priority, retry cap
 tests/test_liveness.py          config + env overrides, heartbeat thread vs. wedged loop
-scripts/chaos_test.py           real control plane + workers against live Redis
+tests/test_failover.py          one leader at a time, epochs, deposed-leader writes rejected,
+                                atomic dispatch
+scripts/chaos_test.py           real control planes + workers against live Redis
 scripts/lease_sweep.py          lease length x heartbeat mode under loop stalls
 ```
 
@@ -203,7 +216,18 @@ PASS  worker-1 woke up and tried to write step-18 with fence 1; rejected. Commit
 
 The fence jumps from 1 to 3 because reassignment and redispatch each bump it: the old holder is invalidated as soon as it is declared dead, before the task is handed out again.
 
-CI runs the unit tests, then the chaos test five ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, and a `SIGSTOP`/`SIGCONT` zombie writer.
+`--control-planes 2 --kill-leader-after 3` kills the leading control plane partway through `failover_dag.json`:
+
+```
+sent SIGKILL to control-plane-2, the leader (epoch 1)
+PASS  97 tasks, 3 workers, completed in 10.39s, one commit per task, 0 re-executed
+PASS  control-plane-1 took over as epoch 2 1.53s after SIGKILL (budget 3.5s)
+PASS  WAL: 42 writes from epoch 1, then only epoch 2; nothing from the old leader landed after the takeover
+```
+
+The same DAG takes about 9.8s with no failure, so the takeover costs roughly one lease. `--pause-leader-after 3` freezes the leader instead, resumes it after the takeover, and also requires it to step down and rejoin as a standby.
+
+CI runs the unit tests, then the chaos test seven ways on every push: sample DAG, 61-task backlog, a mid-run `SIGKILL`, a `SIGTERM` drain, a `SIGSTOP`/`SIGCONT` zombie writer, a killed leader, and a frozen-then-resumed leader.
 
 ---
 
@@ -211,10 +235,11 @@ CI runs the unit tests, then the chaos test five ways on every push: sample DAG,
 
 ```
 src/common/              Task/DAG models, structured logs, Redis client
-src/control_plane/       scheduler, WAL, heartbeat
+src/control_plane/       scheduler, WAL, heartbeat, leader election
 src/worker/              lock + fence executor, heartbeat thread, mock agent
 src/main.py              control-plane | worker | submit-workflow
-config/cluster.yaml      heartbeat, lease, and lock settings
+config/cluster.yaml      heartbeat, lease, lock, and leader settings
+*_dag.json               sample, fan-out (chaos), and chained (failover) workflows
 scripts/                 chaos test and lease sweep
 Dockerfile.control       control-plane image
 Dockerfile.worker        worker image
@@ -224,7 +249,7 @@ Dockerfile.worker        worker image
 
 ## Deliberately not in v1
 
-- Multi-control-plane Raft (availability of the *leader*, not of *tasks*)
+- Replicated coordination state. The control plane fails over, but Redis is one instance; surviving its loss needs Raft or a replicated store, not a lease
 - Real LLM providers in the default path
 - Exactly-once side effects at external APIs
 - Multi-tenant auth, TLS, or a public HTTP surface
