@@ -6,6 +6,7 @@ The README says what Aether survives. This document says how, and why each mecha
 - [Workers: leases, fences, and zombies](#workers-leases-fences-and-zombies)
 - [Choosing the lease](#choosing-the-lease)
 - [Control plane: one dispatcher, then failover](#control-plane-one-dispatcher-then-failover)
+- [Losing Redis: replicas and failover](#losing-redis-replicas-and-failover)
 - [Side effects: idempotency keys](#side-effects-idempotency-keys)
 - [Trade-offs](#trade-offs)
 - [Testing](#testing)
@@ -26,7 +27,7 @@ Every dispatch, claim, result, and reassignment is an append-only delta in a Red
 
 **Reassignment.** When a worker is declared dead, the control plane bumps the fence of each task it held, sets the task back to `PENDING`, deletes its lock, and dispatches it at the *front* of the queue, so recovered work does not wait behind the backlog. Each reassignment counts as a retry; after 3 the task is marked `FAILED` with the reason in the WAL, instead of a poison task taking down the fleet one worker at a time. (`test_worker_failure_reassigns_running_task`, `test_retried_task_jumps_the_queue`, `test_task_fails_after_max_retries`)
 
-**Fencing.** Every task has a monotonic fence (`aether:fence:{task_id}`), and every envelope carries the fence it was dispatched with. `WriteAheadLog.append_delta` checks the delta's fence against the current one inside a `WATCH`/`MULTI` transaction and raises `StaleFenceError` if it is behind, so the check and the append are atomic. A worker that was declared dead and then wakes up (a GC pause, a frozen VM, a partition) cannot commit. (`test_stale_fence_is_rejected`)
+**Fencing.** Every task has a monotonic fence (`aether:fence:{task_id}`), and every envelope carries the fence it was dispatched with. `WriteAheadLog.append_delta` checks the delta's fence against the current one inside a `WATCH`/`MULTI` transaction and raises `StaleFenceError` unless they match, so the check and the append are atomic. (Behind means superseded; ahead can only mean a Redis failover lost the dispatch, see [Losing Redis](#losing-redis-replicas-and-failover).) A worker that was declared dead and then wakes up (a GC pause, a frozen VM, a partition) cannot commit. (`test_stale_fence_is_rejected`)
 
 The fence goes up twice on reassignment: once when the old holder is declared dead, invalidating it immediately, and once when the task is dispatched again.
 
@@ -74,7 +75,7 @@ All timings live in `config/cluster.yaml` and can be overridden with `AETHER_*` 
 
 **Failover.** Control planes compete for one Redis key, `aether:leader`, set with `NX` and a 2s TTL; the winner renews it four times per lease, and the others poll. All scheduler state is in the WAL, so a new leader needs no handoff: its reconcile loop replays each active workflow and dispatches whatever is ready. Workers only talk to Redis, so they keep running through the gap. On `SIGTERM` the leader deletes its own key, so a standby takes over immediately.
 
-**The deposed leader.** The hard case is a leader that was paused rather than killed: it wakes up still believing it leads. Every election increments an epoch, and the key holds `node:epoch`. Every control-plane write (fence bump, WAL append, snapshot) runs in a `WATCH`/`MULTI` transaction that first checks the key still holds this node's token, so a deposed leader's write fails with `NotLeaderError` and the node steps down to standby. This is the fence-token idea applied to the leader. A dispatch's WAL entry and its queue push share one transaction, so a deposed leader cannot enqueue a duplicate either. (`test_deposed_leader_cannot_write`, `test_leader_dispatch_is_atomic_and_records_the_epoch`)
+**The deposed leader.** The hard case is a leader that was paused rather than killed: it wakes up still believing it leads. Every election increments an epoch, and the key holds `node:epoch`. Every control-plane write (fence bump, WAL append, snapshot) runs in a `WATCH`/`MULTI` transaction that first checks the key still holds this node's token, so a deposed leader's write fails with `NotLeaderError` and the node steps down to standby. This is the fence-token idea applied to the leader. The queue push comes only after the dispatch's WAL entry has landed, so a deposed leader cannot enqueue anything new; at worst it pushes the envelope for a dispatch it recorded just before losing the lease, and if the new leader has reassigned that task by then, workers drop the envelope as stale. (`test_deposed_leader_cannot_write`, `test_leader_dispatch_records_the_epoch_and_sends_its_fence`)
 
 Every control-plane delta records its epoch, which makes a takeover auditable from the log alone. The chaos test kills or freezes the leader partway through `failover_dag.json` (12 chains of 8 dependent steps, so the leader keeps dispatching for ~10s) and checks that no write from the old epoch lands after the new leader's first:
 
@@ -86,6 +87,32 @@ PASS  WAL: 42 writes from epoch 1, then only epoch 2; nothing from the old leade
 ```
 
 The same DAG takes about 9.8s with no failure, so a takeover costs roughly one lease. In the frozen-leader variant, the resumed leader usually notices on its first renewal and steps down before attempting a write; when it does write first, the write is rejected.
+
+## Losing Redis: replicas and failover
+
+Everything above trusts Redis. With `REDIS_SENTINELS` set, Redis runs as a primary, a replica, and three Sentinels that promote the replica when the primary stops answering, and every process finds the current primary through Sentinel.
+
+**Riding out the switch.** Every Redis call has a 2s deadline, since a frozen primary never answers. Loops retry Redis errors instead of crashing, WAL writes retry for up to 10s, and a worker keeps retrying its commit for 30s. redis-py reports a connection that drops mid-transaction as a `WatchError` even if `EXEC` went through, so each transaction also writes an op key (`aether:op:{id}`) and a retry that finds it does nothing. A result's op id names the task and fence, so neither a retry nor a second worker holding the same envelope can append a second result, and reassigning a task checks the same key, so reassigning and committing exclude each other. The heartbeat monitor declares nobody dead until it has seen Redis answer promptly for a whole lease, because during an outage nobody could renew.
+
+**What a failover loses.** Replication is asynchronous: the primary acknowledges a write before the replica has it, and Sentinel promotes the replica with whatever it received. A lost write is worse than a missing one when someone has already acted on it:
+
+- A lost election. The epoch counter goes back, and a second control plane is elected with the same epoch, so epoch fencing no longer tells the two apart.
+- A lost dispatch. The fence goes back and the next dispatch issues the same number again, while a worker still holds the first envelope. Its commit lands under the reissued fence, it then starts the second envelope after the task has committed, and the task is left `RUNNING` under a fence that already has a result, so the control plane can never reassign it: the workflow hangs.
+
+**The fix: a write counts once a replica has it.**
+
+- After each WAL transaction the writer runs a script on the primary that bumps a barrier key only if the transaction's op key is there, then `WAIT 1` on the same connection. Replication is ordered, so a replica that has the barrier has the write. If the op key is missing, the write was lost (or the client has already moved to the new primary) and is redone; if no replica confirms within 500ms, it tries again. A caller sees success only for a write that survives the primary's death.
+- A control plane counts as elected only once its lease, and so the epoch increment before it, is on a replica.
+- The envelope goes on the queue only after its dispatch is confirmed. With fence bumps confirmed too, no worker ever holds a fence a failover could issue again. If the control plane dies between the two, orphan reclaim requeues the task.
+- A worker's fence must match Redis exactly, not merely be no older, and a worker cannot start a fence that already has a result.
+
+Heartbeats, lease renewals, locks, and the queue itself are not confirmed. Losing one costs time, not correctness: a worker may be declared dead and its task reassigned under a new fence, and a lost envelope is found by orphan reclaim. (`tests/test_redis_failover.py`)
+
+**Limits.** Sentinel plus `WAIT` is not consensus:
+
+- With more than one replica, `WAIT 1` guarantees one copy, and Sentinel may promote a different replica. It prefers the most up-to-date one but does not promise it. The test topology has one replica, so there is no choice to get wrong.
+- Nodes here run without persistence. A primary that restarts empty before Sentinel notices would replicate its emptiness to everyone. The test only restarts a killed node once another has been promoted, and as its replica; production would enable AOF.
+- Until Sentinel demotes an old primary that comes back, clients still connected to it are cut off from the real one, as in a partition. Their confirmations time out, and workers among them may be declared dead and have their tasks reassigned, which fencing makes safe.
 
 ## Side effects: idempotency keys
 
@@ -108,7 +135,8 @@ This is exactly-once only where the far side honors idempotency keys. An API tha
 
 | Problem | What Aether does | What it does not do |
 | --- | --- | --- |
-| Split-brain control plane | Leader lease in Redis with epoch-checked writes; hot standbys take over in ~2s. | Raft or quorum. Leadership is only as available as the one Redis it lives in. |
+| Split-brain control plane | Leader lease in Redis with epoch-checked writes; hot standbys take over in ~2s. | Raft or quorum. Leadership is only as available as the Redis it lives in. |
+| Losing the Redis primary | Sentinel failover; WAL writes and elections count once a replica has them. | Consensus. One acknowledging replica, no persistence, and Sentinel's own judgment of who is down. |
 | Zombie workers | Monotonic fence tokens checked atomically with each WAL append. | Redlock across several Redis primaries: one Redis, short `NX` locks. |
 | Repeated side effects | Idempotency key per (workflow, task, effect), stable across attempts. | Outbox or reconciliation for APIs that take no key. |
 | Non-deterministic replay | Results are data in the log. | Re-prompting a model during recovery. |
@@ -124,13 +152,18 @@ tests/test_chaos_recovery.py    WAL replay, stale fence, reassignment, checkpoin
                                 retry cap
 tests/test_liveness.py          config and env overrides, heartbeat thread vs. wedged loop
 tests/test_failover.py          one leader at a time, epochs, deposed-leader writes rejected,
-                                atomic dispatch
+                                dispatch records the epoch
+tests/test_redis_failover.py    op-id retries, exact fences, writes redone after a lost
+                                failover, elections and envelopes wait for a replica,
+                                monitor grace after an outage, Sentinel clients
 tests/test_effects.py           idempotency keys: replay, conflict, concurrency, retry under a
                                 new fence, keys off
 tests/test_audit.py             the log auditor passes a real run through a worker failure and
                                 reports each kind of violation planted in it
 scripts/chaos_test.py           real control planes and workers against a live Redis
-scripts/nemesis.py              randomized faults across workers and leaders, audited from the log
+scripts/nemesis.py              randomized faults across workers and leaders (and, with
+                                --redis-ha, Redis itself), audited from the log
+scripts/redis_topology.py       a local Redis primary, replica, and Sentinels to fault
 scripts/compose_smoke.py        the Docker quick start, plus a worker kill and a leader kill
 scripts/lease_sweep.py          lease length x heartbeat mode under event-loop stalls
 ```
@@ -177,6 +210,34 @@ A test that always passes proves little, so two checks were disabled on purpose 
 Epochs in the elected sequence can skip numbers (`epoch 1 -> epoch 3`): every campaign increments the counter before trying the lease, so a candidate that loses the race uses up an epoch. They stay unique and increasing, which is all the fencing needs.
 
 The seed fixes the schedule, not the interleaving, so rerunning a failing seed is where reproducing a bug starts, not a guarantee of seeing it again.
+
+### Redis faults
+
+`nemesis.py --redis-ha` starts a primary, one replica, and three Sentinels (`scripts/redis_topology.py`, 1s down-after), puts the external API's store on a separate Redis as another service's would be, and adds four faults to the schedule: kill the primary, freeze it for 0.5–4s, freeze the replica, and a lagging failover. Freezing the replica alone loses nothing, because the kernel keeps buffering the replication stream and the replica applies all of it when it wakes. So the lagging failover freezes the replica, drops its link from the primary's side, keeps the primary taking writes for 0.3–1.5s, then kills it. A killed node rejoins as a replica once a new primary is elected, and the next fault waits until every node has synced.
+
+Before the fix (fences checked as "not older", writes acknowledged by the primary alone), 8 of seeds 200–219 failed:
+
+- 4 elected two control planes with the same epoch; in one the epoch counter went backwards (epoch 3 elected after epoch 5).
+- 3 hung, each with a task left `RUNNING` under a fence that already had a result, which the control plane skipped reassigning 54–62 times until the run timed out.
+- 1 failed the audit: `task_completed chain-02-step-3: fence 1 is not the current fence None`, a commit under a fence whose dispatch the failover had lost.
+
+With the fix, all 20 passed, through 134 faults including 30 against Redis (14 primary freezes, 7 primary kills, 5 replica freezes, 4 lagging failovers) and 35 leader changes:
+
+```
+seed 202: 7 faults injected, 2 skipped
+  + 3.17s  cut off redis replica :7401, kill primary :7400 0.8s later
+  + 8.90s  freeze redis primary :7401 for 1.4s
+  +10.75s  freeze redis replica :7400 for 3.2s
+  ...
+PASS  97 tasks completed in 30.08s; WAL audit of 295 entries found no violations (1 task re-executed)
+PASS  97 external effects, each performed exactly once; 0 repeated calls answered from the idempotency store
+PASS  one leader per epoch: control-plane-2 (epoch 1) -> control-plane-3 (epoch 2)
+PASS  3 workers declared dead, each while killed, frozen, or cut off by a Redis fault
+```
+
+The price is availability during a fault, not speed in steady state. Runs took a median of 24s, against 18s for the unfixed runs that passed, because writes now stall while no replica can confirm them instead of being accepted and later lost. On a healthy cluster, waiting for the replica costs about 0.25ms per write on localhost (median 0.6–0.7ms without it, 0.9ms with it), and the 97-task workflow takes 9.8–10.0s with or without it. Across machines it would be one extra round trip plus replication lag.
+
+Worker deaths are allowed during a Redis fault, but the first version of the check only knew about the faults it injected. Seed 215 then reported a death 11s after Redis had settled. The Sentinel logs showed why: one Sentinel lost contact with a primary it had promoted a second earlier, and the Sentinels failed over again on their own. The old primary was only demoted 10s later, and until then a worker still connected to it was cut off. The check now reads every failover from the Sentinel logs, requested or not. The run itself was clean: one result per task and one leader per epoch. A 1s down-after makes Sentinel jumpy; production would use a longer one.
 
 To try the same failures by hand with Docker:
 

@@ -21,6 +21,7 @@ CI injects each of these into real processes on every push, except two: the retr
 | Leader control plane killed | A hot standby wins the leader lease and replays state from the log | Took over in 1.5–2.5s |
 | Leader frozen, then resumed | Leader writes are fenced by an election epoch; it steps down | No write from the old epoch after the takeover |
 | All of the above at random | A seeded schedule kills, freezes, and drains workers and leaders mid-run; the log is audited afterwards | 20 of 20 seeds clean: 150 faults, 37 leader changes, 47 late writes rejected |
+| Redis primary killed or frozen, or failed over to a replica that missed writes | Sentinel promotes the replica; a write counts only once the replica has it | 20 of 20 seeds clean through 30 Redis faults among 134. Without the fix, 8 of 20 failed: duplicate leader epochs, hung workflows, a commit under a lost fence |
 | The whole stack in Docker | Same as above, through `docker compose` and `docker kill` | 97 tasks, one commit each, after a worker kill and a leader kill |
 
 ## Guarantees
@@ -28,6 +29,7 @@ CI injects each of these into real processes on every push, except two: the retr
 - **Committed state is fence-monotonic.** A worker or leader that has been replaced cannot write, however late it wakes up.
 - **Execution is at-least-once; external effects are exactly-once** wherever the receiving API honors idempotency keys. APIs that do not would need an outbox or reconciliation, which is not built here.
 - **Recovery never re-prompts a model.** Results are data in the log, so replay is deterministic even when the original step was not.
+- **With a Redis replica, acknowledged writes survive losing the primary.** A dispatch, claim, result, or election counts only once the replica has it ([how, and the limits](docs/DESIGN.md#losing-redis-replicas-and-failover)).
 
 ## Architecture
 
@@ -39,7 +41,7 @@ flowchart TB
     Leader["Leader<br/>epoch N"]
     Standby["Standby"]
   end
-  Redis[("Redis<br/>WAL, snapshots, fences,<br/>task queue, leases")]
+  Redis[("Redis primary + replica<br/>WAL, snapshots, fences,<br/>task queue, leases")]
   Workers["Workers"]
   API["External API<br/>(mock)"]
 
@@ -117,6 +119,12 @@ PASS  6 workers declared dead, each while killed or frozen
 PASS  no process crashed; 1 drained worker exited 0
 ```
 
+`--redis-ha` runs Redis as a primary, a replica, and 3 Sentinels (it needs `redis-server` on the path) and adds Redis to the faults: kill or freeze the primary, freeze the replica, or cut the replica off and then kill the primary, so the failover loses writes.
+
+```sh
+python scripts/nemesis.py --redis-ha --seed 202
+```
+
 ## Repository map
 
 ```
@@ -126,14 +134,15 @@ src/common/           models, settings, structured logs, Redis clients
 src/main.py           control-plane | worker | submit-workflow
 config/cluster.yaml   leases, intervals, lock TTL, idempotency switch (AETHER_* overrides)
 tests/                unit tests on fakeredis
-scripts/              chaos test, randomized faults, Docker Compose smoke test, lease sweep
+scripts/              chaos test, randomized faults, local Redis + Sentinel topology,
+                      Docker Compose smoke test, lease sweep
 *_dag.json            sample (4 tasks), fan-out (61), and chained (97) workflows
 docs/DESIGN.md        how and why
 ```
 
 ## Not in scope
 
-- **Surviving the loss of Redis.** Control planes fail over, but Redis is one instance; that needs Raft or a replicated store, not a lease.
+- **Consensus-grade storage.** Sentinel plus replica-acknowledged writes survives losing the Redis primary, but it is not Raft: with several replicas Sentinel may promote one that missed a write, and nodes here run without persistence.
 - **Real model providers in the default path.** The mock agent keeps failure testing free and deterministic; it is the swap point for Ollama or vLLM.
 - **Exactly-once effects at APIs without idempotency keys.** That needs an outbox or reconciliation.
 - **Multi-tenancy, auth, TLS, or a public API.** Product layers on top of this kernel.

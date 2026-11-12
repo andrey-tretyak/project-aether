@@ -4,10 +4,12 @@ import asyncio
 import time
 
 from redis.asyncio import Redis
-from redis.exceptions import WatchError
+from redis.exceptions import RedisError, WatchError
 
 from src.common.config import Settings, load_settings
 from src.common.logger import get_logger
+from src.common.redis_client import NotReplicatedError, confirm_replicated
+from src.common.redis_client import replica_acks as _default_replica_acks
 
 log = get_logger("aether.leader")
 
@@ -26,11 +28,18 @@ class LeaderElection:
     leader that stalls past its lease and wakes up can never pass for the current one,
     even if it is re-elected later. Control-plane writes check the token in the same
     transaction (see WriteAheadLog), which is what makes a deposed leader harmless.
+
+    With `replica_acks`, a node counts as elected only once replicas hold its lease (and
+    so the epoch increment before it); otherwise a Redis failover could lose the election
+    and hand the same epoch to a second leader.
     """
 
-    def __init__(self, redis: Redis, node_id: str, settings: Settings | None = None):
+    def __init__(
+        self, redis: Redis, node_id: str, settings: Settings | None = None, replica_acks: int | None = None
+    ):
         self.redis = redis
         self.node_id = node_id
+        self.replica_acks = _default_replica_acks() if replica_acks is None else replica_acks
         self.settings = settings or load_settings()
         self.lease_s = self.settings.leader_lease_s
         self.renew_interval_s = self.lease_s / 4
@@ -42,18 +51,37 @@ class LeaderElection:
         """Block until this node holds the leader lease; return its token."""
         log.info("control_plane.standby", extra={"extra_fields": {"node_id": self.node_id}})
         while True:
-            if not await self.redis.exists(LEADER_KEY):
-                epoch = int(await self.redis.incr(LEADER_EPOCH_KEY))
-                token = f"{self.node_id}:{epoch}"
-                if await self.redis.set(LEADER_KEY, token, nx=True, px=self._lease_ms):
-                    self.token, self.epoch = token, epoch
-                    self._lost.clear()
-                    log.info(
-                        "control_plane.elected",
-                        extra={"extra_fields": {"node_id": self.node_id, "epoch": epoch}},
-                    )
-                    return token
+            try:
+                if not await self.redis.exists(LEADER_KEY):
+                    epoch = int(await self.redis.incr(LEADER_EPOCH_KEY))
+                    token = f"{self.node_id}:{epoch}"
+                    if await self.redis.set(LEADER_KEY, token, nx=True, px=self._lease_ms) and (
+                        await self._confirmed(token)
+                    ):
+                        self.token, self.epoch = token, epoch
+                        self._lost.clear()
+                        log.info(
+                            "control_plane.elected",
+                            extra={"extra_fields": {"node_id": self.node_id, "epoch": epoch}},
+                        )
+                        return token
+            except RedisError as exc:
+                log.info("control_plane.redis_unavailable", extra={"extra_fields": {"error": str(exc)}})
             await asyncio.sleep(self.renew_interval_s)
+
+    async def _confirmed(self, token: str) -> bool:
+        if not self.replica_acks:
+            return True
+        deadline = time.monotonic() + self.lease_s / 2
+        while True:
+            try:
+                await confirm_replicated(self.redis, LEADER_KEY, token, self.replica_acks)
+                return True
+            except NotReplicatedError as exc:
+                if time.monotonic() > deadline:
+                    log.info("control_plane.election_unconfirmed", extra={"extra_fields": {"error": str(exc)}})
+                    return False
+                await asyncio.sleep(0.05)
 
     async def renew(self) -> bool:
         """Extend the lease if this node still holds it. False means it has been lost."""

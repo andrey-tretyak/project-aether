@@ -189,9 +189,9 @@ async def test_concurrent_recovery_paths_reassign_a_task_once(redis, wal):
     # fakeredis never yields to the event loop; widen the read-then-bump window like real I/O does.
     bump_fence = scheduler.wal.bump_fence
 
-    async def slow_bump_fence(task_id: str) -> int:
+    async def slow_bump_fence(task_id: str, **kwargs) -> int:
         await asyncio.sleep(0.01)
-        return await bump_fence(task_id)
+        return await bump_fence(task_id, **kwargs)
 
     scheduler.wal.bump_fence = slow_bump_fence
 

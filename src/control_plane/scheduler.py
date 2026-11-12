@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow, TaskStatus, WorkflowState
@@ -202,15 +203,18 @@ class Scheduler:
                 }
             )
 
-            def enqueue(pipe: Any) -> None:
+            def mark_dispatched(pipe: Any) -> None:
                 pipe.set(f"aether:dispatched:{task.id}", str(time.time()))
-                # Workers BRPOP from the right, so RPUSH puts a retry at the head of the line.
-                if task.retry_count > 0:
-                    pipe.rpush(TASK_QUEUE, envelope)
-                else:
-                    pipe.lpush(TASK_QUEUE, envelope)
 
-            await self.wal.append_delta(workflow.workflow_id, delta, also=enqueue)
+            # The envelope goes out only once the dispatch is durable, so a worker never holds a
+            # fence that a Redis failover could take back and issue again. If this node dies in
+            # between, orphan reclaim requeues the task once the dispatch is older than a lease.
+            await self.wal.append_delta(workflow.workflow_id, delta, also=mark_dispatched)
+            # Workers BRPOP from the right, so RPUSH puts a retry at the head of the line.
+            if task.retry_count > 0:
+                await self.redis.rpush(TASK_QUEUE, envelope)
+            else:
+                await self.redis.lpush(TASK_QUEUE, envelope)
             log.info(
                 "task.dispatched",
                 extra={
@@ -231,7 +235,10 @@ class Scheduler:
         worker_id: str | None = None,
     ) -> None:
         task = workflow.task_map()[task_id]
-        fence = await self.wal.bump_fence(task.id)
+        fence = await self.wal.bump_fence(task.id, unless_result_at=task.fence_token)
+        if fence is None:
+            log.info("task.requeue_skipped", extra={"extra_fields": {"task_id": task.id, "reason": "committed"}})
+            return
         retries = task.retry_count + 1
         exhausted = retries > MAX_RETRIES
         delta = {
@@ -291,52 +298,71 @@ class Scheduler:
                     if (task.id, task.fence_token) in queued:
                         continue
                     owner = await self.redis.get(f"{TASK_OWNER_PREFIX}{task.id}") or task.assigned_worker
-                    if owner:
-                        if await self.heartbeat.is_alive(owner):
+                    alive = owner is not None and await self.heartbeat.is_alive(owner)
+                    if owner and not alive:
+                        if not self.heartbeat.can_judge():
                             continue
                         await self._requeue_task(workflow, task.id, reason="orphan_dead_owner")
                         changed = True
                         continue
                     if await self.redis.exists(f"aether:lock:{task.id}"):
                         continue
+                    # Nobody holds it: the envelope was lost, or a live owner gave it up.
                     dispatched_at = await self.redis.get(f"aether:dispatched:{task.id}")
                     timeout = self.settings.lease_s
                     age = time.time() - float(dispatched_at) if dispatched_at else timeout + 1
                     if age <= timeout:
                         continue
-                    await self._requeue_task(workflow, task.id, reason="orphan_lost_envelope")
+                    reason = "orphan_abandoned" if owner else "orphan_lost_envelope"
+                    await self._requeue_task(workflow, task.id, reason=reason)
                     changed = True
                 if changed:
                     await self._advance(workflow_id)
 
     async def consume_results(self) -> None:
-        """Listen for worker results and client submissions on Redis Pub/Sub."""
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(RESULTS_CHANNEL)
-        try:
-            while not self._stop.is_set():
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
-                if not message or message.get("type") != "message":
-                    continue
-                data = message.get("data")
-                if data is None:
-                    continue
-                if isinstance(data, bytes):
-                    data = data.decode()
-                try:
-                    delta = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                try:
-                    await self.apply_task_update(delta)
-                except NotLeaderError as exc:
-                    self._deposed(exc)
+        """Listen for worker results and client submissions on Redis Pub/Sub.
+
+        A Redis failover drops the subscription, and messages published meanwhile are
+        gone; the reconcile loop dispatches whatever they would have woken.
+        """
+        while not self._stop.is_set():
+            pubsub = self.redis.pubsub()
+            try:
+                await pubsub.subscribe(RESULTS_CHANNEL)
+                if not await self._consume(pubsub):
                     return
-                except Exception:
-                    log.exception(
-                        "scheduler.apply_failed",
-                        extra={"extra_fields": {"workflow_id": delta.get("workflow_id")}},
-                    )
-        finally:
-            await pubsub.unsubscribe(RESULTS_CHANNEL)
-            await pubsub.aclose()
+            except RedisError as exc:
+                log.info("scheduler.results_unavailable", extra={"extra_fields": {"error": str(exc)}})
+                await asyncio.sleep(0.5)
+            finally:
+                try:
+                    await pubsub.aclose()
+                except RedisError:
+                    pass
+
+    async def _consume(self, pubsub: Any) -> bool:
+        """Apply results until stopped; False if this node was deposed."""
+        while not self._stop.is_set():
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if not message or message.get("type") != "message":
+                continue
+            data = message.get("data")
+            if data is None:
+                continue
+            if isinstance(data, bytes):
+                data = data.decode()
+            try:
+                delta = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            try:
+                await self.apply_task_update(delta)
+            except NotLeaderError as exc:
+                self._deposed(exc)
+                return False
+            except Exception:
+                log.exception(
+                    "scheduler.apply_failed",
+                    extra={"extra_fields": {"workflow_id": delta.get("workflow_id")}},
+                )
+        return True

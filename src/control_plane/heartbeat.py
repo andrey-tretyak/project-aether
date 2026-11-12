@@ -38,6 +38,7 @@ class HeartbeatMonitor:
         self.poll_interval_s = self.settings.monitor_poll_s
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._seeing_since: float | None = None
 
     def _lease_key(self, worker_id: str) -> str:
         return lease_key(worker_id)
@@ -56,6 +57,7 @@ class HeartbeatMonitor:
 
     async def start(self) -> None:
         self._stop.clear()
+        self._seeing_since = None
         self._task = asyncio.create_task(self._loop(), name="heartbeat-monitor")
 
     async def stop(self) -> None:
@@ -68,6 +70,15 @@ class HeartbeatMonitor:
                 pass
             self._task = None
 
+    def can_judge(self) -> bool:
+        """Whether a lapsed lease proves its worker dead.
+
+        Only once this monitor has seen Redis continuously for a whole lease: at start, or
+        just after a Redis outage or failover, leases may have lapsed because nobody could
+        reach Redis to renew them, and their workers are about to renew.
+        """
+        return self._seeing_since is not None and time.monotonic() - self._seeing_since >= self.timeout_s
+
     async def _loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -75,6 +86,7 @@ class HeartbeatMonitor:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._seeing_since = None
                 log.exception("heartbeat.scan_failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval_s)
@@ -82,7 +94,14 @@ class HeartbeatMonitor:
                 continue
 
     async def _scan_dead_workers(self) -> None:
+        asked = time.monotonic()
         heartbeats = await self.redis.hgetall(HEARTBEAT_HASH)
+        # A slow answer means Redis stalled (a frozen primary answers late rather than failing),
+        # and renewals stalled with it.
+        if self._seeing_since is None or time.monotonic() - asked > self.settings.heartbeat_interval_s:
+            self._seeing_since = time.monotonic()
+        if not self.can_judge():
+            return
         now = time.time()
         for worker_id, ts_raw in heartbeats.items():
             worker_id = _as_str(worker_id)
