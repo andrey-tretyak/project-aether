@@ -127,7 +127,10 @@ tests/test_failover.py          one leader at a time, epochs, deposed-leader wri
                                 atomic dispatch
 tests/test_effects.py           idempotency keys: replay, conflict, concurrency, retry under a
                                 new fence, keys off
+tests/test_audit.py             the log auditor passes a real run through a worker failure and
+                                reports each kind of violation planted in it
 scripts/chaos_test.py           real control planes and workers against a live Redis
+scripts/nemesis.py              randomized faults across workers and leaders, audited from the log
 scripts/compose_smoke.py        the Docker quick start, plus a worker kill and a leader kill
 scripts/lease_sweep.py          lease length x heartbeat mode under event-loop stalls
 ```
@@ -144,6 +147,36 @@ Unit tests use `fakeredis`. `chaos_test.py` starts real processes and fails unle
 | `--pause-leader-after S` | `SIGSTOP` the leader until a standby takes over, then `SIGCONT` |
 | `--set K=V` | Environment override for every process, e.g. `AETHER_IDEMPOTENCY_KEYS=false` |
 | `--expect-duplicate-effects` | Invert the effect check for the control run |
+
+### Randomized faults
+
+Each chaos mode tests one failure at a time, at a moment chosen by hand. `nemesis.py` runs 3 control planes and 3 workers through `failover_dag.json` while a seeded schedule picks a fault every 0.5–2s:
+
+- kill, freeze, or drain a worker, preferring one that is mid-task;
+- kill or freeze the leader, just after a task commits, when it has dispatch work to do.
+
+Killed and drained processes are replaced, and frozen ones resumed, after a random delay. Freezes run from 0.3s to 5s, so some end inside the lease and others outlive it and come back as zombies. A fault is skipped rather than take out the last healthy member of a role.
+
+Afterwards, once every frozen process has woken up and had time to attempt its late writes, `src/control_plane/audit.py` replays the WAL and checks that:
+
+- each task's fences only advance;
+- every worker write carries the task's current fence;
+- no task is dispatched before its dependencies commit, and nothing touches a task after it commits;
+- leader epochs never go backwards;
+- every task commits exactly once.
+
+The run also requires that every effect was performed once, that each epoch was won by one node, that no worker was declared dead outside a kill or freeze, and that no process crashed. `chaos_test.py` runs the same audit.
+
+Twenty consecutive seeds (100–119) passed. They covered 150 faults: 46 worker kills, 45 worker freezes, 17 drains, 20 leader kills, and 22 leader freezes. They produced 37 leader changes and 77 workers declared dead, and fences and leader checks rejected 31 and 16 late writes. CI runs 5 new seeds on every push; a failure prints its seed and keeps the process logs.
+
+A test that always passes proves little, so two checks were disabled on purpose to see whether the run notices:
+
+- **Worker fence check disabled.** The first seed failed. Zombie workers committed with fence 1 after the task had already committed under fence 3.
+- **Leader check disabled.** The audit found no violation in 16 seeds. A woken deposed leader's first write is the snapshot checkpoint, which is harmless when stale because recovery replays the WAL from the snapshot's own index. That checkpoint is where all 16 rejections above happened. By then the renewal loop has seen the lease is gone and stops the scheduler before it dispatches. The leader check on the dispatch path is covered by `test_deposed_leader_cannot_write` and `test_deposed_scheduler_steps_down_without_dispatching`, not by process-level faults.
+
+Epochs in the elected sequence can skip numbers (`epoch 1 -> epoch 3`): every campaign increments the counter before trying the lease, so a candidate that loses the race uses up an epoch. They stay unique and increasing, which is all the fencing needs.
+
+The seed fixes the schedule, not the interleaving, so rerunning a failing seed is where reproducing a bug starts, not a guarantee of seeing it again.
 
 To try the same failures by hand with Docker:
 

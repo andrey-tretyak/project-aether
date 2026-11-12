@@ -20,6 +20,7 @@ CI injects each of these into real processes on every push, except two: the retr
 | Task keeps crashing its workers | Retry cap of 3, then `FAILED` with the reason in the log | The workflow fails cleanly instead of taking down worker after worker |
 | Leader control plane killed | A hot standby wins the leader lease and replays state from the log | Took over in 1.5–2.5s |
 | Leader frozen, then resumed | Leader writes are fenced by an election epoch; it steps down | No write from the old epoch after the takeover |
+| All of the above at random | A seeded schedule kills, freezes, and drains workers and leaders mid-run; the log is audited afterwards | 20 of 20 seeds clean: 150 faults, 37 leader changes, 47 late writes rejected |
 | The whole stack in Docker | Same as above, through `docker compose` and `docker kill` | 97 tasks, one commit each, after a worker kill and a leader kill |
 
 ## Guarantees
@@ -83,24 +84,49 @@ python scripts/chaos_test.py --kill-after 2
 
 ```
 sent SIGKILL to worker-1 while it held step-19
-PASS  61 tasks, 3 workers, completed in 8.41s, one commit per task, 1 re-executed
-PASS  worker-1 detected dead 1.42s after SIGKILL (budget 2.5s)
-PASS  its in-flight work finished on a survivor 1.77s after SIGKILL (budget 3.5s)
+PASS  61 tasks, 3 workers, completed in 8.45s, one commit per task, 1 re-executed, WAL audit clean
+PASS  worker-1 detected dead 1.45s after SIGKILL (budget 2.5s)
+PASS  its in-flight work finished on a survivor 1.80s after SIGKILL (budget 3.5s)
 PASS  61 external effects, each performed exactly once; 0 repeated calls answered from the idempotency store
 ```
 
 Swap the flag for `--pause-after 2` (zombie worker), `--stop-after 2` (drain), or `--control-planes 2 --kill-leader-after 3` / `--pause-leader-after 3` with `--dag failover_dag.json` (leader failover). [docs/DESIGN.md](docs/DESIGN.md#testing) lists every mode.
 
+The randomized test mixes all of these on 3 control planes and 3 workers, restarting or resuming each victim after a random delay, then audits the write-ahead log for every guarantee above. The seed fixes the fault schedule; exact timings vary from run to run.
+
+```sh
+python scripts/nemesis.py --seed 107
+```
+
+```
+seed 107: 9 faults injected, 0 skipped
+  + 0.88s  drain worker-2 (holding chain-10-step-1)
+  + 2.11s  freeze worker-3 (holding chain-06-step-2) for 0.8s
+  + 3.74s  kill worker-3 (holding chain-04-step-3), replaced after 2.0s
+  + 5.61s  freeze worker-1 (holding chain-01-step-4) for 1.5s
+  + 7.23s  freeze control-plane-2 (epoch 1) for 3.8s
+  + 8.06s  kill worker-4 (holding chain-09-step-5), replaced after 0.9s
+  + 8.79s  kill worker-1 (idle), replaced after 1.1s
+  +10.57s  kill worker-6 (holding chain-10-step-6), replaced after 2.0s
+  +11.51s  freeze worker-7 (holding chain-09-step-6) for 3.2s
+PASS  97 tasks completed in 16.31s; WAL audit of 307 entries found no violations (5 tasks re-executed)
+      late writes rejected: 2 from zombie workers (fence), 1 from deposed leaders (leader check)
+PASS  97 external effects, each performed exactly once; 2 repeated calls answered from the idempotency store
+PASS  one leader per epoch: control-plane-2 (epoch 1) -> control-plane-3 (epoch 3)
+PASS  6 workers declared dead, each while killed or frozen
+PASS  no process crashed; 1 drained worker exited 0
+```
+
 ## Repository map
 
 ```
-src/control_plane/    scheduler, write-ahead log, heartbeat monitor, leader election
+src/control_plane/    scheduler, write-ahead log, heartbeat monitor, leader election, log auditor
 src/worker/           executor (locks, fences, drain), heartbeat thread, mock agent, keyed effects
 src/common/           models, settings, structured logs, Redis clients
 src/main.py           control-plane | worker | submit-workflow
 config/cluster.yaml   leases, intervals, lock TTL, idempotency switch (AETHER_* overrides)
 tests/                unit tests on fakeredis
-scripts/              chaos test, Docker Compose smoke test, lease sweep
+scripts/              chaos test, randomized faults, Docker Compose smoke test, lease sweep
 *_dag.json            sample (4 tasks), fan-out (61), and chained (97) workflows
 docs/DESIGN.md        how and why
 ```
