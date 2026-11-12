@@ -71,15 +71,34 @@ class RedisTopology:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
-                known = Redis(port=self.sentinel_ports[0]).sentinel_master(MASTER_NAME)
-                if all(self.synced(port) for port in replicas) and known["num-other-sentinels"] == len(
-                    self.sentinel_ports
-                ) - 1:
+                peers = [
+                    Redis(port=port, socket_timeout=0.5).sentinel_master(MASTER_NAME)["num-other-sentinels"]
+                    for port in self.sentinel_ports
+                ]
+                if all(n == len(self.sentinel_ports) - 1 for n in peers) and self._replicas_ready(replicas):
                     return
             except Exception:
                 pass
             time.sleep(0.2)
         raise RuntimeError("Redis topology did not come up")
+
+    def _replicas_ready(self, replicas: list[int]) -> bool:
+        """Every replica has synced, and every Sentinel knows it as a healthy replica.
+
+        Sentinels learn replicas only from the primary's INFO, which they poll every 10s.
+        A primary that dies before that leaves them nobody to promote: each failover attempt
+        aborts with no-good-slave, and Redis stays down."""
+        if not all(self.synced(port) for port in replicas):
+            return False
+        for port in self.sentinel_ports:
+            try:
+                known = Redis(port=port, socket_timeout=0.5).sentinel_slaves(MASTER_NAME)
+            except Exception:
+                return False
+            healthy = {int(r["port"]) for r in known if not r.get("is_sdown") and not r.get("is_disconnected")}
+            if not set(replicas) <= healthy:
+                return False
+        return True
 
     def synced(self, port: int) -> bool:
         """Whether a replica has finished its initial sync. Until then it holds nothing, yet
@@ -99,11 +118,11 @@ class RedisTopology:
             return None
 
     def settled(self) -> bool:
-        """One agreed primary, and every other running node a fully synced replica."""
+        """One agreed primary, and every other running node a synced replica the Sentinels know."""
         primary = self.primary()
         if primary is None or not self.alive(primary):
             return False
-        return all(self.synced(p) for p in self.node_ports if p != primary and self.alive(p))
+        return self._replicas_ready([p for p in self.node_ports if p != primary and self.alive(p)])
 
     def replicas(self) -> list[int]:
         primary = self.primary()
