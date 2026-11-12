@@ -77,7 +77,7 @@ async def test_deposed_leader_cannot_write(redis):
     assert await redis.get("aether:snapshot:ha") is None
 
 
-async def test_leader_dispatch_is_atomic_and_records_the_epoch(redis):
+async def test_leader_dispatch_records_the_epoch_and_sends_its_fence(redis):
     leader = LeaderElection(redis, "cp-1", SETTINGS)
     await leader.campaign()
     await Scheduler(redis, SETTINGS).submit_workflow(_dag(), dispatch=False)

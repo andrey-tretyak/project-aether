@@ -12,7 +12,9 @@ from pathlib import Path
 from src.common.config import load_settings
 from src.common.logger import get_logger
 from src.common.models import DAGWorkflow
-from src.common.redis_client import create_redis, create_sync_redis
+from redis.exceptions import RedisError
+
+from src.common.redis_client import create_external_api_redis, create_redis, create_sync_redis
 from src.control_plane.leader import LeaderElection
 from src.control_plane.scheduler import Scheduler
 from src.worker.executor import WorkerExecutor
@@ -54,14 +56,18 @@ async def run_control_plane() -> None:
                 await scheduler.stop()
     finally:
         if election.token is not None:
-            await election.resign()
+            try:
+                await election.resign()
+            except RedisError:
+                log.info("control_plane.resign_failed", extra={"extra_fields": {"node_id": node_id}})
         await redis.aclose()
 
 
 async def run_worker() -> None:
     redis = create_redis()
     heartbeat_client = create_sync_redis()
-    worker = WorkerExecutor(redis, heartbeat_client=heartbeat_client)
+    external_api_redis = create_external_api_redis()
+    worker = WorkerExecutor(redis, heartbeat_client=heartbeat_client, external_api_redis=external_api_redis)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, worker.request_stop)
@@ -70,6 +76,8 @@ async def run_worker() -> None:
     finally:
         heartbeat_client.close()
         await redis.aclose()
+        if external_api_redis is not None:
+            await external_api_redis.aclose()
 
 
 async def submit_workflow(path: str) -> None:
