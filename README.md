@@ -146,3 +146,7 @@ docs/DESIGN.md        how and why
 - **Real model providers in the default path.** The mock agent keeps failure testing free and deterministic; it is the swap point for Ollama or vLLM.
 - **Exactly-once effects at APIs without idempotency keys.** That needs an outbox or reconciliation.
 - **Multi-tenancy, auth, TLS, or a public API.** Product layers on top of this kernel.
+
+## License
+
+[MIT](LICENSE)
