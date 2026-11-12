@@ -45,6 +45,7 @@ from redis.asyncio import Redis  # noqa: E402
 
 from src.common.config import load_settings  # noqa: E402
 from src.common.models import TaskStatus  # noqa: E402
+from src.control_plane.audit import audit_wal  # noqa: E402
 from src.control_plane.heartbeat import HEARTBEAT_HASH  # noqa: E402
 from src.control_plane.leader import LEADER_KEY  # noqa: E402
 from src.control_plane.wal import WriteAheadLog  # noqa: E402
@@ -339,6 +340,9 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
         duplicates = {t: n for t, n in commits.items() if n != 1}
         if duplicates or len(commits) != len(tasks):
             raise ChaosFailure(f"expected exactly one commit per task; got {dict(commits)}")
+        violations = audit_wal([json.loads(d) for d in raw], {t.id: t.dependencies for t in state.workflow.tasks})
+        if violations:
+            raise ChaosFailure(f"WAL audit found {len(violations)} violations: {violations[:5]}")
 
         cp_events = _log_events(*cp_logs)
         dead_events = [e for e in cp_events if e.get("msg") == "worker.dead"]
@@ -351,7 +355,7 @@ async def run(args: argparse.Namespace, metrics: dict[str, Any]) -> None:
 
         print(
             f"PASS  {len(tasks)} tasks, {args.workers} workers, completed in {elapsed:.2f}s, "
-            f"one commit per task, {stats['extra_executions']} re-executed"
+            f"one commit per task, {stats['extra_executions']} re-executed, WAL audit clean"
         )
         if stats["false_deaths"] and not args.allow_false_deaths:
             raise ChaosFailure(f"live workers were declared dead: {stats['false_dead_workers']}")
