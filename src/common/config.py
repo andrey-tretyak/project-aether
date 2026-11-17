@@ -19,9 +19,14 @@ _SOURCES = {
     "lock_ttl_s": (("locks", "ttl_s"), "AETHER_LOCK_TTL_S"),
     "leader_lease_s": (("control_plane", "leader_lease_s"), "AETHER_LEADER_LEASE_S"),
     "idempotency_keys": (("effects", "idempotency_keys"), "AETHER_IDEMPOTENCY_KEYS"),
+    "agent_backend": (("agent", "backend"), "AETHER_AGENT_BACKEND"),
+    "ollama_url": (("agent", "ollama_url"), "AETHER_OLLAMA_URL"),
+    "ollama_model": (("agent", "ollama_model"), "AETHER_OLLAMA_MODEL"),
+    "ollama_timeout_s": (("agent", "ollama_timeout_s"), "AETHER_OLLAMA_TIMEOUT_S"),
 }
 
 HEARTBEAT_MODES = ("thread", "loop")
+AGENT_BACKENDS = ("mock", "ollama")
 
 
 @dataclass(frozen=True)
@@ -34,14 +39,22 @@ class Settings:
     lock_ttl_s: float = 5.0
     leader_lease_s: float = 2.0
     idempotency_keys: bool = True
+    agent_backend: str = "mock"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "llama3.2"
+    ollama_timeout_s: float = 120.0
 
     def __post_init__(self) -> None:
         if self.heartbeat_mode not in HEARTBEAT_MODES:
             raise ValueError(f"heartbeat mode must be one of {HEARTBEAT_MODES}, got {self.heartbeat_mode!r}")
+        if self.agent_backend not in AGENT_BACKENDS:
+            raise ValueError(f"agent backend must be one of {AGENT_BACKENDS}, got {self.agent_backend!r}")
         if self.lease_s <= self.heartbeat_interval_s:
             raise ValueError("lease_s must be longer than heartbeat_interval_s")
         if self.leader_lease_s <= 0:
             raise ValueError("leader_lease_s must be positive")
+        if self.ollama_timeout_s <= 0:
+            raise ValueError("ollama_timeout_s must be positive")
 
 
 def load_settings(path: Optional[Path] = None) -> Settings:

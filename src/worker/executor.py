@@ -17,9 +17,9 @@ from src.common.models import TaskStatus
 from src.control_plane.heartbeat import HeartbeatMonitor
 from src.control_plane.scheduler import RESULTS_CHANNEL, TASK_OWNER_PREFIX, TASK_QUEUE
 from src.control_plane.wal import ResultCommitted, StaleFenceError, WriteAheadLog, result_op
+from src.worker.agent import run_agent
 from src.worker.effects import MockExternalAPI, perform_effects
 from src.worker.heartbeat_thread import HeartbeatThread
-from src.worker.mock_agent import run_mock_agent
 
 log = get_logger("aether.worker")
 
@@ -155,7 +155,7 @@ class WorkerExecutor:
             outcome = {"fence_token": fence, "assigned_worker": self.worker_id}
             try:
                 payload = envelope.get("payload") or {}
-                result = await run_mock_agent(envelope.get("agent_prompt", ""), payload)
+                result = await run_agent(envelope.get("agent_prompt", ""), payload, self.settings)
                 effects = payload.get("effects") or []
                 if effects:
                     result["effects"] = await perform_effects(

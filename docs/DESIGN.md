@@ -21,6 +21,8 @@ Every dispatch, claim, result, and reassignment is an append-only delta in a Red
 
 **Recovery never re-prompts a model.** LLM and tool output is data in the log, so replay is deterministic even when the original step was not.
 
+**The agent is a swap point.** `run_agent` defaults to a deterministic mock (`AETHER_AGENT_BACKEND=mock`) so fault tests stay free. Setting `ollama` POSTs to a local Ollama `/api/generate` off the event loop; the heartbeat thread keeps renewing the lease while the model runs. A failed call fails the task and is requeued under a new fence. (`tests/test_agent.py`)
+
 ## Workers: leases, fences, and zombies
 
 **Liveness.** Each worker renews a lease key (`aether:lease:{worker}`, 1.5s TTL) every 500ms. The control plane scans for expired leases every 500ms and declares those workers dead.
@@ -141,7 +143,7 @@ This is exactly-once only where the far side honors idempotency keys. An API tha
 | Repeated side effects | Idempotency key per (workflow, task, effect), stable across attempts. | Outbox or reconciliation for APIs that take no key. |
 | Non-deterministic replay | Results are data in the log. | Re-prompting a model during recovery. |
 | Queue vs. bus | Redis list plus pub/sub wake-ups, backed by a reconcile loop. | NATS or RabbitMQ. The envelope would swap easily; the state machine is the point. |
-| Cost of testing failure | Mock agent, `SIGKILL`/`SIGSTOP`, and `docker kill`. | Staging spend or GPUs. |
+| Cost of testing failure | Mock agent, `SIGKILL`/`SIGSTOP`, and `docker kill`. | Staging spend or GPUs. Ollama is optional and off in CI. |
 
 ## Testing
 
@@ -156,6 +158,8 @@ tests/test_failover.py          one leader at a time, epochs, deposed-leader wri
 tests/test_redis_failover.py    op-id retries, exact fences, writes redone after a lost
                                 failover, elections and envelopes wait for a replica,
                                 monitor grace after an outage, Sentinel clients
+tests/test_agent.py             mock default, Ollama request shape, unreachable server,
+                                env overrides
 tests/test_effects.py           idempotency keys: replay, conflict, concurrency, retry under a
                                 new fence, keys off
 tests/test_audit.py             the log auditor passes a real run through a worker failure and
