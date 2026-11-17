@@ -4,6 +4,8 @@
 
 **Fault-tolerant orchestration for multi-agent DAGs.** Workers and control planes can die, freeze, or come back from the dead mid-step; workflow state stays correct, and side effects happen once.
 
+![Randomized fault test: seed 107](docs/demo.gif)
+
 Agent workflows are a bad fit for "just queue the LLM calls": steps are non-deterministic, expensive to redo, and often touch the outside world. The failure that breaks naive systems is a worker that stalls while holding a result, gets replaced, then wakes up and writes anyway. Aether is a small, fully tested kernel for that problem: an append-only log, fence tokens, leases, and idempotency keys, running on Redis and Docker on a laptop.
 
 ## What it survives
@@ -101,20 +103,21 @@ python scripts/nemesis.py --seed 107
 ```
 
 ```
-seed 107: 9 faults injected, 0 skipped
-  + 0.88s  drain worker-2 (holding chain-10-step-1)
-  + 2.11s  freeze worker-3 (holding chain-06-step-2) for 0.8s
-  + 3.74s  kill worker-3 (holding chain-04-step-3), replaced after 2.0s
-  + 5.61s  freeze worker-1 (holding chain-01-step-4) for 1.5s
-  + 7.23s  freeze control-plane-2 (epoch 1) for 3.8s
-  + 8.06s  kill worker-4 (holding chain-09-step-5), replaced after 0.9s
-  + 8.79s  kill worker-1 (idle), replaced after 1.1s
-  +10.57s  kill worker-6 (holding chain-10-step-6), replaced after 2.0s
-  +11.51s  freeze worker-7 (holding chain-09-step-6) for 3.2s
-PASS  97 tasks completed in 16.31s; WAL audit of 307 entries found no violations (5 tasks re-executed)
+seed 107
+  + 0.89s  drain worker-2 (holding chain-11-step-1)
+  + 2.11s  freeze worker-3 (holding chain-03-step-2) for 0.8s
+  + 3.75s  kill worker-3 (holding chain-04-step-3), replaced after 2.0s
+  + 5.62s  freeze worker-1 (holding chain-06-step-4) for 1.5s
+  + 7.16s  freeze control-plane-2 (epoch 1) for 3.8s
+  + 8.07s  kill worker-4 (holding chain-07-step-5), replaced after 0.9s
+  + 8.80s  kill worker-1 (idle), replaced after 1.1s
+  +10.58s  kill worker-6 (holding chain-11-step-5), replaced after 2.0s
+  +11.52s  freeze worker-7 (holding chain-03-step-7) for 3.2s
+9 faults injected, 0 skipped
+PASS  97 tasks completed in 16.23s; WAL audit of 307 entries found no violations (5 tasks re-executed)
       late writes rejected: 2 from zombie workers (fence), 1 from deposed leaders (leader check)
 PASS  97 external effects, each performed exactly once; 2 repeated calls answered from the idempotency store
-PASS  one leader per epoch: control-plane-2 (epoch 1) -> control-plane-3 (epoch 3)
+PASS  one leader per epoch: control-plane-2 (epoch 1) -> control-plane-3 (epoch 2)
 PASS  6 workers declared dead, each while killed or frozen
 PASS  no process crashed; 1 drained worker exited 0
 ```

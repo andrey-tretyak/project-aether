@@ -471,6 +471,7 @@ async def run_once(args: argparse.Namespace, seed: int) -> dict[str, Any]:
             stdout=subprocess.DEVNULL,
         )
         submitted = time.monotonic()
+        print(f"seed {seed}", flush=True)
 
         async def finished() -> bool:
             try:
@@ -487,7 +488,9 @@ async def run_once(args: argparse.Namespace, seed: int) -> dict[str, Any]:
             if await finished():
                 break
             done = await _inject(cluster, redis, wal, workflow_id, fault)
-            history.append(f"+{time.monotonic() - submitted:5.2f}s  {done or f'skip {fault.kind} (nothing spare to fault)'}")
+            line = f"+{time.monotonic() - submitted:5.2f}s  {done or f'skip {fault.kind} (nothing spare to fault)'}"
+            history.append(line)
+            print(f"  {line}", flush=True)
 
         dependencies = {t["id"]: t.get("dependencies", []) for t in dag["tasks"]}
         try:
@@ -499,9 +502,7 @@ async def run_once(args: argparse.Namespace, seed: int) -> dict[str, Any]:
         await asyncio.sleep(SETTLE_S)
 
         injected = [h for h in history if " skip " not in h]
-        print(f"seed {seed}: {len(injected)} faults injected, {len(history) - len(injected)} skipped")
-        for line in history:
-            print(f"  {line}")
+        print(f"{len(injected)} faults injected, {len(history) - len(injected)} skipped", flush=True)
 
         deltas = [json.loads(d) for d in await redis.lrange(f"aether:wal:{workflow_id}", 0, -1)]
         violations = audit_wal(deltas, dependencies)
@@ -535,9 +536,6 @@ async def run_once(args: argparse.Namespace, seed: int) -> dict[str, Any]:
         print(f"PASS  no process crashed; {_count(drains, 'drained worker')} exited 0")
         return {"seed": seed, "passed": True, "faults": len(injected), "elapsed_s": round(elapsed, 2)}
     except Exception:
-        print(f"seed {seed} history:")
-        for line in history:
-            print(f"  {line}")
         print(f"logs: {logdir}")
         raise
     finally:
