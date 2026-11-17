@@ -79,6 +79,16 @@ docker compose run --rm control-plane python -m src.main submit-workflow sample_
 docker compose logs -f control-plane worker
 ```
 
+Workers default to a deterministic mock agent so fault tests stay free and repeatable. To run the same DAG against a local [Ollama](https://ollama.com) model:
+
+```sh
+ollama pull llama3.2
+AETHER_AGENT_BACKEND=ollama docker compose up --build -d --scale control-plane=2 --scale worker=2
+docker compose run --rm control-plane python -m src.main submit-workflow sample_dag.json
+```
+
+Compose reaches Ollama on the host at `host.docker.internal:11434`. For processes on the host instead, `AETHER_OLLAMA_URL` defaults to `http://127.0.0.1:11434`. A failed or timed-out model call fails the task and is retried under a new fence, same as any other agent error.
+
 The chaos test runs real processes against a local Redis and injects one failure:
 
 ```sh
@@ -132,10 +142,10 @@ python scripts/nemesis.py --redis-ha --seed 202
 
 ```
 src/control_plane/    scheduler, write-ahead log, heartbeat monitor, leader election, log auditor
-src/worker/           executor (locks, fences, drain), heartbeat thread, mock agent, keyed effects
+src/worker/           executor (locks, fences, drain), heartbeat thread, mock/Ollama agent, keyed effects
 src/common/           models, settings, structured logs, Redis clients
 src/main.py           control-plane | worker | submit-workflow
-config/cluster.yaml   leases, intervals, lock TTL, idempotency switch (AETHER_* overrides)
+config/cluster.yaml   leases, intervals, lock TTL, agent backend, idempotency switch (AETHER_* overrides)
 tests/                unit tests on fakeredis
 scripts/              chaos test, randomized faults, local Redis + Sentinel topology,
                       Docker Compose smoke test, lease sweep
@@ -146,7 +156,7 @@ docs/DESIGN.md        how and why
 ## Not in scope
 
 - **Consensus-grade storage.** Sentinel plus replica-acknowledged writes survives losing the Redis primary, but it is not Raft: with several replicas Sentinel may promote one that missed a write, and nodes here run without persistence.
-- **Real model providers in the default path.** The mock agent keeps failure testing free and deterministic; it is the swap point for Ollama or vLLM.
+- **Cloud model APIs.** `AETHER_AGENT_BACKEND=ollama` talks to a local Ollama server; the default remains the mock so CI stays free. OpenAI-compatible HTTP is the same shape of swap.
 - **Exactly-once effects at APIs without idempotency keys.** That needs an outbox or reconciliation.
 - **Multi-tenancy, auth, TLS, or a public API.** Product layers on top of this kernel.
 

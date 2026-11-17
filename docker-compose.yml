@@ -25,6 +25,11 @@ services:
       dockerfile: Dockerfile.worker
     environment:
       REDIS_URL: redis://redis:6379/0
+      # Optional real model: set AETHER_AGENT_BACKEND=ollama (and pull a model).
+      # From Docker Desktop, reach the host's Ollama with host.docker.internal.
+      AETHER_AGENT_BACKEND: ${AETHER_AGENT_BACKEND:-mock}
+      AETHER_OLLAMA_URL: ${AETHER_OLLAMA_URL:-http://host.docker.internal:11434}
+      AETHER_OLLAMA_MODEL: ${AETHER_OLLAMA_MODEL:-llama3.2}
     depends_on:
       redis:
         condition: service_healthy

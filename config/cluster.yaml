@@ -31,3 +31,11 @@ effects:
   # effect index), so a retried or zombie execution cannot repeat it. Turn off only
   # to watch duplicates happen.
   idempotency_keys: true
+
+agent:
+  # "mock": deterministic local reply (default; what CI and the fault tests use).
+  # "ollama": POST to a local Ollama /api/generate. Needs ollama running and a pulled model.
+  backend: mock
+  ollama_url: http://127.0.0.1:11434
+  ollama_model: llama3.2
+  ollama_timeout_s: 120
